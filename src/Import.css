@@ -1,0 +1,93 @@
+.import {
+  text-align: left;
+  padding: 1rem 2rem;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.import-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.import-error {
+  color: #c0392b;
+}
+
+.import-summary {
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.04);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.import-participants {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.import-participants button.active {
+  background-color: #2ecc71;
+  color: white;
+}
+
+.import-empty {
+  opacity: 0.7;
+}
+
+.import-source {
+  display: flex;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.04);
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  align-items: center;
+}
+
+.import-source strong {
+  flex: 1;
+}
+
+.import-person {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.04);
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.import-person strong {
+  flex: 1;
+}
+
+.import-person select {
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+}
+
+.import-excluded-tag {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #c0392b;
+  border: 1px solid #c0392b;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .import-summary,
+  .import-source,
+  .import-person {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+}

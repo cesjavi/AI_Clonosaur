@@ -1,0 +1,189 @@
+:root {
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 2rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.app-header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.app-nav {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.app-advanced-bar {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 2rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.app-advanced-bar button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  background-color: #ffffff;
+}
+
+.app-advanced-bar button.active {
+  background-color: #396cd8;
+  color: white;
+}
+
+.app-nav button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.5rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  background-color: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.app-nav button.active {
+  background-color: #396cd8;
+  color: white;
+}
+
+.app-main {
+  flex: 1;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f6f6f6;
+    background-color: #2f2f2f;
+  }
+
+  .app-header {
+    border-bottom-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .app-nav button,
+  .app-advanced-bar button {
+    color: #ffffff;
+    background-color: #0f0f0f98;
+  }
+
+  .app-advanced-bar {
+    border-bottom-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* El tema elegido en Configuración tiene prioridad sobre prefers-color-scheme */
+:root[data-theme="dark"] {
+  color: #f6f6f6;
+  background-color: #2f2f2f;
+}
+
+:root[data-theme="dark"] .app-header {
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="dark"] .app-nav button,
+:root[data-theme="dark"] .app-advanced-bar button {
+  color: #ffffff;
+  background-color: #0f0f0f98;
+}
+
+:root[data-theme="dark"] .app-advanced-bar {
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] {
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+}
+
+:root[data-theme="light"] .app-header {
+  border-bottom-color: rgba(0, 0, 0, 0.1);
+}
+
+:root[data-theme="light"] .app-nav button,
+:root[data-theme="light"] .app-advanced-bar button {
+  color: #0f0f0f;
+  background-color: #ffffff;
+}
+
+/* Override centralizado para las "tarjetas" y controles de formulario de
+   todas las pantallas: evita tener que duplicar data-theme en cada CSS por
+   pantalla cuando todas comparten el mismo patrón visual. */
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] select {
+  background-color: #1f1f1f;
+  color: #f6f6f6;
+  border-color: #444;
+}
+
+:root[data-theme="dark"] .chat-bubble,
+:root[data-theme="dark"] .profile-trait,
+:root[data-theme="dark"] .import-source,
+:root[data-theme="dark"] .import-person,
+:root[data-theme="dark"] .memories-item,
+:root[data-theme="dark"] .copilot-draft,
+:root[data-theme="dark"] .metrics-card,
+:root[data-theme="dark"] .privacidad-item,
+:root[data-theme="dark"] .memory-result,
+:root[data-theme="dark"] .import-summary,
+:root[data-theme="dark"] .profile-category .profile-trait {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="light"] input,
+:root[data-theme="light"] textarea,
+:root[data-theme="light"] select {
+  background-color: #ffffff;
+  color: #0f0f0f;
+  border-color: #ccc;
+}
+
+:root[data-theme="light"] .chat-bubble,
+:root[data-theme="light"] .profile-trait,
+:root[data-theme="light"] .import-source,
+:root[data-theme="light"] .import-person,
+:root[data-theme="light"] .memories-item,
+:root[data-theme="light"] .copilot-draft,
+:root[data-theme="light"] .metrics-card,
+:root[data-theme="light"] .privacidad-item,
+:root[data-theme="light"] .memory-result,
+:root[data-theme="light"] .import-summary {
+  background-color: rgba(0, 0, 0, 0.04);
+}

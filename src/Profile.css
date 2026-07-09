@@ -1,0 +1,105 @@
+.profile {
+  text-align: left;
+  padding: 1rem 2rem;
+}
+
+.profile-generators {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.profile-gen-error {
+  color: #c0392b;
+  margin-bottom: 1rem;
+}
+
+.profile-body {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+}
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 260px;
+}
+
+.profile-form input,
+.profile-form textarea {
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+}
+
+.profile-form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.profile-list {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-empty {
+  opacity: 0.7;
+}
+
+.profile-category {
+  margin-bottom: 1.5rem;
+}
+
+.profile-category h3 {
+  text-transform: capitalize;
+  margin-bottom: 0.5rem;
+}
+
+.profile-trait {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.04);
+  margin-bottom: 0.5rem;
+}
+
+.profile-trait p {
+  margin: 0.25rem 0;
+}
+
+.profile-source {
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+
+.profile-evidence {
+  font-size: 0.8rem;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.profile-trait-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .profile-form input,
+  .profile-form textarea {
+    background-color: #1f1f1f;
+    color: #f6f6f6;
+    border-color: #444;
+  }
+
+  .profile-trait {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+}

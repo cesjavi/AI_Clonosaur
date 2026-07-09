@@ -1,0 +1,66 @@
+.memories {
+  text-align: left;
+  padding: 1rem 2rem;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.memories-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.memories-error {
+  color: #c0392b;
+}
+
+.memories-empty {
+  opacity: 0.7;
+}
+
+.memories-item {
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.04);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.memories-layer {
+  display: inline-block;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 0.35rem;
+}
+
+.memories-content {
+  margin: 0 0 0.5rem 0;
+}
+
+.memories-item textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.5rem;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+}
+
+.memories-evidence {
+  font-size: 0.8rem;
+  font-style: italic;
+  opacity: 0.7;
+  margin: 0 0 0.5rem 0;
+}
+
+.memories-item-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .memories-item {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+}

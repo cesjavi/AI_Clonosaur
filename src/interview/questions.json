@@ -1,0 +1,64 @@
+[
+  {
+    "module": "identidad",
+    "label": "Identidad",
+    "questions": [
+      { "id": "identidad_1", "text": "¿Cómo te describís?" },
+      { "id": "identidad_2", "text": "¿Qué partes de vos suelen malinterpretar otros?" },
+      { "id": "identidad_3", "text": "¿Qué valores no negociás?" },
+      { "id": "identidad_4", "text": "¿Qué cosas sentís que te definen?" }
+    ]
+  },
+  {
+    "module": "estilo_mental",
+    "label": "Estilo mental",
+    "questions": [
+      { "id": "estilo_mental_1", "text": "¿Pensás más en imágenes, palabras, estructuras, sensaciones o escenarios?" },
+      { "id": "estilo_mental_2", "text": "¿Decidís rápido o procesás mucho?" },
+      { "id": "estilo_mental_3", "text": "¿Qué te hace cambiar de opinión?" },
+      { "id": "estilo_mental_4", "text": "¿Cómo reaccionás bajo estrés?" }
+    ]
+  },
+  {
+    "module": "comunicacion",
+    "label": "Comunicación",
+    "questions": [
+      { "id": "comunicacion_1", "text": "¿Sos directo, diplomático, irónico, afectivo o analítico?" },
+      { "id": "comunicacion_2", "text": "¿Qué tipo de humor usás?" },
+      { "id": "comunicacion_3", "text": "¿Qué frases son muy tuyas?" },
+      { "id": "comunicacion_4", "text": "¿Qué cosas nunca dirías?" }
+    ]
+  },
+  {
+    "module": "relaciones",
+    "label": "Relaciones",
+    "questions": [
+      { "id": "relaciones_1", "text": "¿Quiénes son personas importantes en tu vida?" },
+      { "id": "relaciones_2", "text": "¿Cómo cambia tu forma de hablar según el contexto?" },
+      { "id": "relaciones_3", "text": "¿Qué límites debe respetar el agente?" }
+    ]
+  },
+  {
+    "module": "memoria_autobiografica",
+    "label": "Memoria autobiográfica",
+    "questions": [
+      { "id": "memoria_autobiografica_1", "text": "Contá un momento formativo de tu vida." },
+      { "id": "memoria_autobiografica_2", "text": "¿Cuál fue una decisión importante que tomaste?" },
+      { "id": "memoria_autobiografica_3", "text": "¿A qué le tenés miedo?" },
+      { "id": "memoria_autobiografica_4", "text": "¿Cuáles son tus ambiciones?" },
+      { "id": "memoria_autobiografica_5", "text": "¿Qué contradicciones personales reconocés en vos?" },
+      { "id": "memoria_autobiografica_6", "text": "¿Cambiaste de opinión sobre algo importante a lo largo del tiempo? ¿Sobre qué?" }
+    ]
+  },
+  {
+    "module": "control_del_clon",
+    "label": "Control del clon",
+    "questions": [
+      { "id": "control_del_clon_1", "text": "¿Puede el clon hablar como vos?" },
+      { "id": "control_del_clon_2", "text": "¿Puede dar consejos en tu nombre?" },
+      { "id": "control_del_clon_3", "text": "¿Puede redactar respuestas para otros?" },
+      { "id": "control_del_clon_4", "text": "¿Qué temas debe evitar?" },
+      { "id": "control_del_clon_5", "text": "¿Qué nivel de autonomía le permitís?" }
+    ]
+  }
+]
