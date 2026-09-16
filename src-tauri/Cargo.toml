@@ -36,7 +36,7 @@ csv = "1"
 base64 = "0.22"
 quoted_printable = "0.4"
 whisper-rs = "0.16"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = "0.5"
 rand = "0.8"
 
