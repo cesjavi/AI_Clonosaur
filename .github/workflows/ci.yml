@@ -10,7 +10,7 @@ jobs:
     name: Frontend (lint, typecheck, test, build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -27,7 +27,7 @@ jobs:
     name: Rust (check, test, clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tauri v2's runtime deps on Linux. whisper-rs also needs a C/C++
       # toolchain (cmake, clang/libclang for bindgen) since it builds
@@ -77,7 +77,7 @@ jobs:
     name: Rust (cargo audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Scans Cargo.lock against the RustSec advisory database — doesn't
       # need to compile anything, so it runs as its own fast job separate
       # from the full check/test/clippy build.
@@ -103,7 +103,7 @@ jobs:
       matrix:
         platform: [windows-latest, macos-latest, ubuntu-22.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
