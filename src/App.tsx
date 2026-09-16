@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "./backend/invoke";
 import Interview from "./Interview";
 import Profile from "./Profile";
 import Memory from "./Memory";
@@ -11,6 +11,7 @@ import Metrics from "./Metrics";
 import Privacidad from "./Privacidad";
 import Settings from "./Settings";
 import SplashScreen from "./Splash";
+import { UnlockScreen } from "./Vault";
 import "./App.css";
 
 type Screen =
@@ -50,6 +51,7 @@ function App() {
   const [screen, setScreen] = useState<Screen>("chat");
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [vaultLocked, setVaultLocked] = useState<boolean | null>(null);
 
   function loadSettings() {
     invoke<Record<string, string>>("get_settings").then((s) => {
@@ -58,10 +60,46 @@ function App() {
     });
   }
 
-  useEffect(loadSettings, []);
+  useEffect(() => {
+    invoke<{ configured: boolean; locked: boolean }>("get_vault_status")
+      .then((s) => setVaultLocked(s.locked))
+      .catch(() => setVaultLocked(false));
+  }, []);
+
+  // Only touch the database once we know the vault isn't locked — on the web
+  // build, querying before this resolves makes db.worker.ts create a real
+  // (empty) plaintext OPFS database ahead of the unlock screen. Re-runs after
+  // a web unlock too (which just flips vaultLocked to false without a
+  // reload), so settings actually reflect the newly-unlocked database
+  // instead of the placeholder's defaults.
+  useEffect(() => {
+    if (vaultLocked === false) loadSettings();
+  }, [vaultLocked]);
 
   if (showSplash) {
     return <SplashScreen onFinish={() => setShowSplash(false)} />;
+  }
+
+  if (vaultLocked === null) {
+    return null;
+  }
+
+  if (vaultLocked) {
+    // Desktop: reloading the webview is safe — the Rust process (and the
+    // live connection unlock_vault just swapped in) survives the reload,
+    // it's just the simplest way to make every screen re-fetch. Web: a
+    // reload would kill the dedicated Worker that unlock_vault just loaded
+    // the decrypted database into (Workers don't survive navigation), so
+    // instead just flip local state and let the already-running Worker
+    // keep serving the now-unlocked in-memory database.
+    return (
+      <UnlockScreen
+        onUnlocked={() => {
+          if (isTauri()) window.location.reload();
+          else setVaultLocked(false);
+        }}
+      />
+    );
   }
 
   const focusedMode = onboardingCompleted === true;

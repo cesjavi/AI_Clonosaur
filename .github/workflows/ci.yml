@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend:
+    name: Frontend (lint, typecheck, test, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+  rust:
+    name: Rust (check, test, clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2's runtime deps on Linux. whisper-rs also needs a C/C++
+      # toolchain (cmake, clang/libclang for bindgen) since it builds
+      # whisper.cpp from source.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            cmake \
+            clang \
+            libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+  audit:
+    name: Rust (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Scans Cargo.lock against the RustSec advisory database — doesn't
+      # need to compile anything, so it runs as its own fast job separate
+      # from the full check/test/clippy build.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          file: src-tauri/Cargo.lock
+
+  build-check:
+    name: Build check (${{ matrix.platform }})
+    # Only on pushes to main, not every PR: a full `tauri build` per
+    # platform recompiles whisper.cpp from source and takes several
+    # minutes each, so this only runs once code actually lands on main
+    # rather than on every PR update. release.yml (triggered by version
+    # tags) is the one that does this for real, signed, on the way to a
+    # published release — this job exists purely to catch platform-specific
+    # packaging breakage (missing bundle deps, icon/config issues) earlier
+    # than that, without waiting for a tag.
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            cmake \
+            clang \
+            libclang-dev
+
+      - run: npm ci
+
+      # No signing key here on purpose: this job only verifies that the
+      # native installer/bundle actually builds on each OS, it doesn't
+      # publish anything, so it doesn't need (or want) access to the real
+      # updater signing secret — that's release.yml's job, on a real tag.
+      - name: Build app bundle (verification only, unsigned)
+        run: npm run tauri build -- --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"

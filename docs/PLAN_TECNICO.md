@@ -114,6 +114,22 @@ The three generators share a structure (gather evidence → prompt that requires
 
 **Done when:** a new user reaches a working chat in under a minute after the master password, without having to understand 20 screens first.
 
+## Phase 8 — Quality gates, CI, and releases
+
+**Goal:** catch regressions before they ship, and get bug fixes to users without a manual reinstall.
+
+Depends on Phases 1–7 existing (there's nothing to test or release before then).
+
+- **Unit tests** (Vitest for `src/backend/*.ts`, `cargo test` for `src-tauri/src/*.rs`): focused on the parsing/normalization logic that's hardest to eyeball-verify and easiest to silently regress — timestamp parsing per source (WhatsApp's ambiguous dd/mm vs mm/dd, Twitter's UTC offset math, Gmail's RFC822 dates), MIME decoding (`gmail_import.rs`'s Q/base64 encoded-words, quoted-printable, multipart boundary walking), CSV column resolution, conversation-fingerprint dedup, and the vault's encrypt/decrypt round-trip. Deliberately not testing React components or Tauri commands end-to-end — the pure functions underneath them carry the actual risk.
+- **Cross-language consistency test** (`sensitivity.sync.test.ts`): `sensitivity.ts` is a hand-maintained port of `sensitivity.rs` (same keyword list, two languages, one per build target). Nothing enforced they stayed identical until this test — it reads both source files and fails if either has a keyword the other doesn't.
+- **Linting**: ESLint (`typescript-eslint` + `eslint-plugin-react-hooks`) for the frontend, `cargo clippy -D warnings` + `cargo fmt --check` for Rust. Both run in CI, not just locally — a linter nobody's forced to run before merging catches nothing.
+- **Dependency auditing**: `npm audit` and `cargo audit` (via `rustsec/audit-check`), both wired into CI. Dependabot (`.github/dependabot.yml`) opens the update PRs automatically instead of relying on someone remembering to run the audit.
+- **CI** (`.github/workflows/ci.yml`): three jobs — `frontend` (lint → typecheck → test → build), `rust` (fmt → check → test → clippy), `audit` (cargo-audit). Split into separate jobs so a slow Rust rebuild doesn't block a fast frontend-only PR from getting a lint result.
+- **Release automation** (`.github/workflows/release.yml`, `tauri-apps/tauri-action`): pushing a `v*` tag builds the installers for Windows/macOS/Linux and publishes them as a GitHub Release, including the updater manifest (`latest.json`).
+- **Auto-update** (`tauri-plugin-updater`): the app checks the release's `latest.json` and offers to install newer versions in place. Requires a signing keypair (`cargo tauri signer generate`) — the private key lives in the `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub Actions secrets (never committed), the public key lives in `tauri.conf.json` so installed apps can verify update authenticity before applying one.
+
+**Done when:** a `git push` runs tests/lint/audit automatically and blocks a broken merge; a `git tag vX.Y.Z && git push --tags` produces installers and existing installs offer to update to them.
+
 ## Summary order (strong dependencies)
 
 ```
@@ -125,6 +141,7 @@ Phase 0 (scaffold)
                                                    └─ Phase 5 (local chat → RAG → streaming → hybrid)
                                                           └─ Phase 6 (copilot + safeguards + encryption)
                                                                  └─ Phase 7 (voice + startup UX)
+                                                                        └─ Phase 8 (tests, CI, releases, auto-update)
 ```
 
 Centralized settings (part of Phase 7) is worth moving up to Phase 1 — it's the only decision in this list that, done late, forces you to touch 11 files instead of 1.

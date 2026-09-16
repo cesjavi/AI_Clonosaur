@@ -84,7 +84,11 @@ pub async fn generate_tone(state: State<'_, DbState>) -> Result<usize, String> {
             continue;
         }
 
-        let sample = msgs.iter().map(|m| format!("- {m}")).collect::<Vec<_>>().join("\n");
+        let sample = msgs
+            .iter()
+            .map(|m| format!("- {m}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let prompt = format!(
             "Estos son mensajes propios de una persona en una sola conversación ('{label}'). \
 Describí en una o dos frases el tono que usa en este contexto específico (ej. formal, cariñoso, \

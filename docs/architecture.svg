@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="700" fill="#f8fafc"/>
+
+  <text x="40" y="36" font-size="19" font-weight="700" fill="#0f172a">How Clonosaur talks to language models</text>
+  <text x="40" y="58" font-size="12.5" fill="#64748b">Local chat never leaves this machine. Hybrid mode only goes out after you review the exact text and confirm.</text>
+
+  <!-- Row A: local chat -->
+  <g>
+    <rect x="40" y="100" width="170" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+    <text x="52" y="118" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#047857">YOUR MACHINE</text>
+    <text x="52" y="140" font-size="13" font-weight="700" fill="#0f172a">Clonosaur app</text>
+    <text x="52" y="160" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">Simple / RAG chat</text>
+
+    <line x1="210" y1="150" x2="282" y2="150" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="246" y="138" font-size="9.5" fill="#475569" text-anchor="middle">request / reply</text>
+
+    <rect x="290" y="100" width="180" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+    <text x="302" y="118" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#047857">YOUR MACHINE</text>
+    <text x="302" y="140" font-size="13" font-weight="700" fill="#0f172a">Local engine</text>
+    <text x="302" y="158" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">Ollama :11434</text>
+    <text x="302" y="172" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">or Lemonade :1234</text>
+
+    <text x="40" y="222" font-size="11.5" fill="#64748b">Nothing leaves this machine — embeddings and chat completion both run locally.</text>
+  </g>
+
+  <!-- Row B: hybrid direct -->
+  <g>
+    <rect x="40" y="290" width="170" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+    <text x="52" y="308" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#047857">YOUR MACHINE</text>
+    <text x="52" y="330" font-size="13" font-weight="700" fill="#0f172a">Clonosaur app</text>
+    <text x="52" y="350" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">hybrid.rs</text>
+
+    <line x1="210" y1="340" x2="282" y2="340" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="246" y="322" font-size="9" fill="#475569" text-anchor="middle">① build preview</text>
+    <text x="246" y="333" font-size="9" fill="#475569" text-anchor="middle">no network yet</text>
+
+    <rect x="290" y="290" width="170" height="100" rx="10" fill="#fffbeb" stroke="#b45309" stroke-width="1.5"/>
+    <text x="302" y="308" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#92400e">YOU CONFIRM</text>
+    <text x="302" y="330" font-size="13" font-weight="700" fill="#0f172a">Preview &amp; confirm</text>
+    <text x="302" y="349" font-size="9" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">"Ver preview" →</text>
+    <text x="302" y="362" font-size="9" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">"Confirmar y enviar"</text>
+
+    <line x1="460" y1="340" x2="532" y2="340" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="496" y="322" font-size="9" fill="#475569" text-anchor="middle">② Bearer: your own</text>
+    <text x="496" y="333" font-size="9" fill="#475569" text-anchor="middle">Groq API key</text>
+
+    <rect x="540" y="290" width="170" height="100" rx="10" stroke-dasharray="4 3" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="552" y="308" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#475569">EXTERNAL</text>
+    <text x="552" y="330" font-size="13" font-weight="700" fill="#0f172a">Groq Cloud</text>
+    <text x="552" y="350" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">api.groq.com</text>
+
+    <text x="40" y="412" font-size="11.5" fill="#64748b">Direct hybrid — your real Groq API key stays in your local database and is sent straight to Groq.</text>
+  </g>
+
+  <!-- Row C: hybrid via proxy -->
+  <g>
+    <rect x="40" y="480" width="170" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+    <text x="52" y="498" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#047857">YOUR MACHINE</text>
+    <text x="52" y="520" font-size="13" font-weight="700" fill="#0f172a">Clonosaur app</text>
+    <text x="52" y="540" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">hybrid.rs</text>
+
+    <line x1="210" y1="530" x2="282" y2="530" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="246" y="512" font-size="9" fill="#475569" text-anchor="middle">① build preview</text>
+    <text x="246" y="523" font-size="9" fill="#475569" text-anchor="middle">no network yet</text>
+
+    <rect x="290" y="480" width="170" height="100" rx="10" fill="#fffbeb" stroke="#b45309" stroke-width="1.5"/>
+    <text x="302" y="498" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#92400e">YOU CONFIRM</text>
+    <text x="302" y="520" font-size="13" font-weight="700" fill="#0f172a">Preview &amp; confirm</text>
+    <text x="302" y="539" font-size="9" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">same gate</text>
+    <text x="302" y="552" font-size="9" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">as direct path</text>
+
+    <line x1="460" y1="530" x2="532" y2="530" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="496" y="512" font-size="9" fill="#475569" text-anchor="middle">② Bearer: shared</text>
+    <text x="496" y="523" font-size="9" fill="#475569" text-anchor="middle">secret only</text>
+
+    <rect x="540" y="480" width="170" height="100" rx="10" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.5"/>
+    <text x="552" y="498" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#1e40af">THE WEB</text>
+    <text x="552" y="520" font-size="13" font-weight="700" fill="#0f172a">vercel-backend</text>
+    <text x="552" y="540" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">/chat/completions</text>
+
+    <line x1="710" y1="530" x2="782" y2="530" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="746" y="512" font-size="9" fill="#475569" text-anchor="middle">③ Bearer: real</text>
+    <text x="746" y="523" font-size="9" fill="#475569" text-anchor="middle">GROQ_API_KEY</text>
+
+    <rect x="790" y="480" width="170" height="100" rx="10" stroke-dasharray="4 3" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="802" y="498" font-size="8.5" font-weight="700" letter-spacing="0.5" fill="#475569">EXTERNAL</text>
+    <text x="802" y="520" font-size="13" font-weight="700" fill="#0f172a">Groq Cloud</text>
+    <text x="802" y="540" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" fill="#475569">api.groq.com</text>
+
+    <text x="40" y="602" font-size="11.5" fill="#64748b">Proxied hybrid — installs only ever hold a shared secret; the real Groq key lives only on Vercel.</text>
+  </g>
+
+  <!-- Legend -->
+  <g font-size="11" fill="#334155">
+    <rect x="40" y="644" width="14" height="14" rx="3" fill="#ecfdf5" stroke="#059669"/>
+    <text x="60" y="655">Your machine</text>
+
+    <rect x="200" y="644" width="14" height="14" rx="3" fill="#fffbeb" stroke="#b45309"/>
+    <text x="220" y="655">You confirm before anything sends</text>
+
+    <rect x="470" y="644" width="14" height="14" rx="3" fill="#eff6ff" stroke="#1d4ed8"/>
+    <text x="490" y="655">Code you deployed (Vercel)</text>
+
+    <rect x="700" y="644" width="14" height="14" rx="3" stroke-dasharray="3 2" fill="#f1f5f9" stroke="#64748b"/>
+    <text x="720" y="655">Third-party cloud (Groq)</text>
+  </g>
+
+  <text x="40" y="686" font-size="10.5" fill="#94a3b8" font-style="italic">Full setup: docs/VERCEL_GROQ_SETUP.md and vercel-backend/README.md</text>
+</svg>

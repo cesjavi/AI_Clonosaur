@@ -13,6 +13,10 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text";
 /// user's machine; this is not the hybrid mode, it's just the API
 /// format that the local engine speaks.
 pub const DEFAULT_LOCAL_API_STYLE: &str = "ollama";
+/// "tiny" | "base" | "small" | "medium" — must match transcription::ALLOWED_MODELS.
+/// "base" balances download size (~140MB) against transcription quality for
+/// short voice notes; "tiny" is faster but noticeably worse.
+pub const DEFAULT_WHISPER_MODEL: &str = "base";
 
 /// One-off read of a preference, with fallback to the default if it isn't
 /// saved yet or if the database is momentarily inaccessible. This was
@@ -37,7 +41,9 @@ pub fn get_settings(state: State<DbState>) -> Result<HashMap<String, String>, St
         .prepare("SELECT key, value FROM app_settings")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?;
 
     let mut map = HashMap::new();
@@ -54,7 +60,10 @@ pub fn get_settings(state: State<DbState>) -> Result<HashMap<String, String>, St
         .or_insert_with(|| DEFAULT_EMBEDDING_MODEL.to_string());
     map.entry("local_api_style".to_string())
         .or_insert_with(|| DEFAULT_LOCAL_API_STYLE.to_string());
-    map.entry("theme".to_string()).or_insert_with(|| "system".to_string());
+    map.entry("whisper_model".to_string())
+        .or_insert_with(|| DEFAULT_WHISPER_MODEL.to_string());
+    map.entry("theme".to_string())
+        .or_insert_with(|| "system".to_string());
     map.entry("onboarding_completed".to_string())
         .or_insert_with(|| "false".to_string());
 

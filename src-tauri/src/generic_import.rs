@@ -99,7 +99,7 @@ pub fn import_generic_file(state: State<DbState>, path: String) -> Result<Import
         &source_id,
         "generic",
         &file_name,
-        Some(&file_name.to_lowercase()),
+        Some(&import_common::fingerprint_file_name(&file_name)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -115,8 +115,8 @@ pub fn import_generic_file(state: State<DbState>, path: String) -> Result<Import
                 if !participants.contains(name) {
                     participants.push(name.clone());
                 }
-                let pid = import_common::get_or_create_person(&conn, name)
-                    .map_err(|e| e.to_string())?;
+                let pid =
+                    import_common::get_or_create_person(&conn, name).map_err(|e| e.to_string())?;
                 import_common::ensure_participant(&conn, &conversation_id, &pid)
                     .map_err(|e| e.to_string())?;
                 (Some(pid), rec.is_user.unwrap_or(false))

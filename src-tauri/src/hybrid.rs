@@ -180,7 +180,13 @@ pub async fn send_to_external_provider(
         conn.query_row(
             "SELECT base_url, api_key, model FROM provider_credentials WHERE provider = ?1",
             params![provider],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .map_err(|_| format!("no hay credenciales guardadas para '{provider}'"))?
     };
@@ -265,5 +271,6 @@ pub fn list_external_send_log(state: State<DbState>) -> Result<Vec<SendLogEntry>
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }

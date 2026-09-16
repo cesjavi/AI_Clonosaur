@@ -28,7 +28,11 @@ fn row_to_memory(
     let evidence = metadata.as_deref().and_then(|m| {
         serde_json::from_str::<serde_json::Value>(m)
             .ok()
-            .and_then(|v| v.get("evidence").and_then(|e| e.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                v.get("evidence")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string())
+            })
     });
     MemoryItem {
         id,
@@ -41,7 +45,10 @@ fn row_to_memory(
 }
 
 #[tauri::command]
-pub fn list_memories(state: State<DbState>, status: Option<String>) -> Result<Vec<MemoryItem>, String> {
+pub fn list_memories(
+    state: State<DbState>,
+    status: Option<String>,
+) -> Result<Vec<MemoryItem>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -63,7 +70,8 @@ pub fn list_memories(state: State<DbState>, status: Option<String>) -> Result<Ve
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -121,7 +129,8 @@ pub async fn generate_candidate_memories(state: State<'_, DbState>) -> Result<us
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
     };
 
     if messages.is_empty() {
@@ -157,7 +166,10 @@ Respondé ÚNICAMENTE un array JSON de objetos con esas 4 claves, sin texto adic
         if fact.content.trim().is_empty() {
             continue;
         }
-        let source_message_id = fact.index.and_then(|i| messages.get(i)).map(|(id, _)| id.clone());
+        let source_message_id = fact
+            .index
+            .and_then(|i| messages.get(i))
+            .map(|(id, _)| id.clone());
         let evidence_text = llm::value_to_text(&fact.evidence);
         let metadata = serde_json::json!({ "evidence": evidence_text }).to_string();
 

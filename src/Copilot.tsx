@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend/invoke";
 import "./Copilot.css";
 
 interface PersonSummary {

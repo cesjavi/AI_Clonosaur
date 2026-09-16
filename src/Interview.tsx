@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend/invoke";
 import questionsData from "./interview/questions.json";
 import "./Interview.css";
 
@@ -114,9 +114,10 @@ export default function Interview() {
                 id={key}
                 rows={3}
                 value={answers[key] ?? ""}
-                onChange={(e) =>
-                  setAnswers((prev) => ({ ...prev, [key]: e.currentTarget.value }))
-                }
+                onChange={(e) => {
+                  const nextValue = e.currentTarget.value;
+                  setAnswers((prev) => ({ ...prev, [key]: nextValue }));
+                }}
                 onBlur={(e) => saveAnswer(current.module, q, e.currentTarget.value)}
               />
               {savingKey === key && <span className="interview-saving">Guardando…</span>}

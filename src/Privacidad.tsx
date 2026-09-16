@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend/invoke";
+import { VaultSecurity } from "./Vault";
 import "./Privacidad.css";
+
+interface VaultStatus {
+  configured: boolean;
+  locked: boolean;
+}
 
 interface SourceSummary {
   id: string;
@@ -29,10 +35,14 @@ export default function Privacidad() {
   const [confirming, setConfirming] = useState<{ kind: "source" | "contact"; id: string; label: string } | null>(
     null,
   );
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
 
   function load() {
     invoke<SourceSummary[]>("list_sources").then(setSources);
     invoke<PersonSummary[]>("list_people").then((all) => setPeople(all.filter((p) => !p.is_user)));
+    invoke<VaultStatus>("get_vault_status")
+      .then(setVaultStatus)
+      .catch(() => setVaultStatus(null));
   }
 
   useEffect(load, []);
@@ -137,6 +147,8 @@ export default function Privacidad() {
         <input type="datetime-local" value={to} onChange={(e) => setTo(e.currentTarget.value)} required />
         <button type="submit">Borrar rango</button>
       </form>
+
+      {vaultStatus && <VaultSecurity status={vaultStatus} onStatusChange={load} />}
     </div>
   );
 }

@@ -38,7 +38,14 @@ This policy translates the "Product Principles" and privacy risks described in [
 - Every clone response based on memory must be able to show the sources (messages, interview answers) that back it up.
 - The agent must state uncertainty ("I don't know") when it doesn't have enough evidence, instead of making things up.
 
-## 7. What the app does not do in the MVP
+## 7. Encryption at rest (optional)
+
+- You can set a master password from "Privacidad" → "Seguridad". Once set, "Lock now" encrypts the whole database file with AES-256-GCM, using a key derived from your password via Argon2id.
+- While locked, only an encrypted file exists on disk (`clonosaur.db.enc`); the plaintext working copy is deleted. Unlocking decrypts it back to a working copy for the session.
+- **There is no password recovery.** If you lose the master password, the encrypted data cannot be recovered by the app, its developers, or anyone else. This is a deliberate trade-off: recoverability would require either a backdoor or a weaker key derivation.
+- Encryption is optional and off by default — until you set a master password, the database is stored as a plain SQLite file, exactly as in earlier phases of this project.
+
+## 8. What the app does not do in the MVP
 
 - It doesn't use official WhatsApp/Gmail/etc. APIs to extract data automatically; it only processes exports that you import manually.
 - It doesn't send messages to third parties autonomously.

@@ -43,7 +43,8 @@ pub fn list_profile_traits(state: State<DbState>) -> Result<Vec<ProfileTrait>, S
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Manual creation of a trait. Traits with `source = 'inferred'` are created by the

@@ -127,9 +127,11 @@ fn decode_encoded_words(input: &str) -> String {
 
 fn decode_body(body: &str, transfer_encoding: &str) -> String {
     match transfer_encoding.to_lowercase().trim() {
-        "quoted-printable" => quoted_printable::decode(body.as_bytes(), quoted_printable::ParseMode::Robust)
-            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-            .unwrap_or_else(|_| body.to_string()),
+        "quoted-printable" => {
+            quoted_printable::decode(body.as_bytes(), quoted_printable::ParseMode::Robust)
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+                .unwrap_or_else(|_| body.to_string())
+        }
         "base64" => {
             let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
             base64::engine::general_purpose::STANDARD
@@ -274,7 +276,7 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
         &source_id,
         "gmail",
         &file_name,
-        Some(&file_name.to_lowercase()),
+        Some(&import_common::fingerprint_file_name(&file_name)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -307,10 +309,7 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
         let labels = get_header(&headers, "x-gmail-labels").unwrap_or("");
-        let is_user = labels
-            .to_lowercase()
-            .split(',')
-            .any(|l| l.trim() == "sent");
+        let is_user = labels.to_lowercase().split(',').any(|l| l.trim() == "sent");
 
         let person_id = if is_user {
             None
@@ -320,8 +319,8 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
             if !participants.contains(&display) {
                 participants.push(display.clone());
             }
-            let pid = import_common::get_or_create_person(&conn, &display)
-                .map_err(|e| e.to_string())?;
+            let pid =
+                import_common::get_or_create_person(&conn, &display).map_err(|e| e.to_string())?;
             import_common::ensure_participant(&conn, &conversation_id, &pid)
                 .map_err(|e| e.to_string())?;
             Some(pid)
@@ -351,4 +350,196 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
         duplicates,
         participants,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_on_from_lines_at_the_start_of_a_message() {
+        let content = "From a@b Mon Jan 1\nHeader: x\n\nbody one\nFrom c@d Tue Jan 2\nHeader: y\n\nbody two\n";
+        let blocks = split_mbox_messages(content);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].contains("body one"));
+        assert!(blocks[1].contains("body two"));
+    }
+
+    #[test]
+    fn does_not_split_on_an_escaped_from_inside_a_body() {
+        let content =
+            "From a@b Mon Jan 1\nHeader: x\n\n>From this is quoted, not a boundary\nmore body\n";
+        let blocks = split_mbox_messages(content);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains(">From this is quoted"));
+    }
+
+    #[test]
+    fn split_mbox_messages_handles_empty_content() {
+        assert_eq!(split_mbox_messages("").len(), 0);
+    }
+
+    #[test]
+    fn splits_headers_from_body_on_blank_line() {
+        assert_eq!(
+            split_headers_body("A: 1\nB: 2\n\nthe body"),
+            ("A: 1\nB: 2", "the body")
+        );
+    }
+
+    #[test]
+    fn splits_headers_from_body_on_crlf_blank_line() {
+        assert_eq!(
+            split_headers_body("A: 1\r\nB: 2\r\n\r\nthe body"),
+            ("A: 1\r\nB: 2", "the body")
+        );
+    }
+
+    #[test]
+    fn parses_headers_and_joins_folded_continuation_lines() {
+        let headers = parse_headers("Subject: hello\n world\nFrom: a@b");
+        assert_eq!(get_header(&headers, "subject"), Some("hello world"));
+        assert_eq!(get_header(&headers, "from"), Some("a@b"));
+    }
+
+    #[test]
+    fn decode_q_encoding_handles_underscore_and_hex_escapes() {
+        let decoded = decode_q_encoding("Hola_mundo=21");
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Hola mundo!");
+    }
+
+    #[test]
+    fn decode_encoded_words_decodes_a_q_encoded_subject() {
+        assert_eq!(decode_encoded_words("=?UTF-8?Q?Hola_mundo?="), "Hola mundo");
+    }
+
+    #[test]
+    fn decode_encoded_words_leaves_plain_text_untouched() {
+        assert_eq!(
+            decode_encoded_words("plain subject, no encoding"),
+            "plain subject, no encoding"
+        );
+    }
+
+    #[test]
+    fn decode_body_decodes_quoted_printable() {
+        assert_eq!(
+            decode_body("Hola=20mundo=21", "quoted-printable"),
+            "Hola mundo!"
+        );
+    }
+
+    #[test]
+    fn decode_body_decodes_base64() {
+        // "hola" base64-encoded
+        assert_eq!(decode_body("aG9sYQ==", "base64"), "hola");
+    }
+
+    #[test]
+    fn decode_body_passes_through_unknown_encodings() {
+        assert_eq!(decode_body("plain text", "7bit"), "plain text");
+    }
+
+    #[test]
+    fn strip_html_tags_removes_tags_and_decodes_entities() {
+        assert_eq!(
+            strip_html_tags("<p>Hola&nbsp;&amp;&nbsp;chau</p>"),
+            "Hola & chau"
+        );
+    }
+
+    #[test]
+    fn get_boundary_reads_quoted_boundary() {
+        assert_eq!(
+            get_boundary(r#"multipart/mixed; boundary="abc123""#),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn get_boundary_reads_unquoted_boundary() {
+        assert_eq!(
+            get_boundary("multipart/mixed; boundary=abc123"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn get_boundary_returns_none_when_absent() {
+        assert_eq!(get_boundary("text/plain"), None);
+    }
+
+    #[test]
+    fn extract_plain_text_from_a_simple_text_plain_message() {
+        assert_eq!(
+            extract_plain_text("text/plain", "7bit", "hola"),
+            Some("hola".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_strips_html_when_only_html_part_exists() {
+        assert_eq!(
+            extract_plain_text("text/html", "7bit", "<p>hola</p>"),
+            Some("hola".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_prefers_plain_over_html_in_multipart() {
+        // extract_plain_text itself doesn't trim trailing whitespace from a
+        // part's body (the caller in import_gmail_file does) — trim here to
+        // check the meaningful content instead of exact boundary whitespace.
+        let body = "--B\r\nContent-Type: text/html\r\n\r\n<p>html</p>\r\n--B\r\nContent-Type: text/plain\r\n\r\nplain text\r\n--B--";
+        let result = extract_plain_text("multipart/alternative; boundary=B", "7bit", body);
+        assert_eq!(
+            result.map(|s| s.trim().to_string()),
+            Some("plain text".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_falls_back_to_html_when_no_plain_part() {
+        let body = "--B\r\nContent-Type: text/html\r\n\r\n<p>html only</p>\r\n--B--";
+        let result = extract_plain_text("multipart/alternative; boundary=B", "7bit", body);
+        assert_eq!(
+            result.map(|s| s.trim().to_string()),
+            Some("html only".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_from_header_extracts_display_name() {
+        assert_eq!(parse_from_header("Jane Doe <jane@example.com>"), "Jane Doe");
+    }
+
+    #[test]
+    fn parse_from_header_strips_quotes_around_display_name() {
+        assert_eq!(
+            parse_from_header("\"Jane Doe\" <jane@example.com>"),
+            "Jane Doe"
+        );
+    }
+
+    #[test]
+    fn parse_from_header_falls_back_to_email_with_no_display_name() {
+        assert_eq!(parse_from_header("<jane@example.com>"), "jane@example.com");
+    }
+
+    #[test]
+    fn parse_gmail_date_parses_rfc822_style_dates() {
+        let result = parse_gmail_date("Wed, 10 Oct 2018 20:19:24 +0000").unwrap();
+        assert!(result.starts_with("2018-10-10T20:19:24"));
+    }
+
+    #[test]
+    fn parse_gmail_date_strips_trailing_timezone_comment() {
+        let result = parse_gmail_date("Wed, 10 Oct 2018 20:19:24 +0000 (UTC)").unwrap();
+        assert!(result.starts_with("2018-10-10T20:19:24"));
+    }
+
+    #[test]
+    fn parse_gmail_date_returns_none_for_garbage() {
+        assert_eq!(parse_gmail_date("not a date"), None);
+    }
 }

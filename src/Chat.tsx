@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./backend/invoke";
 import "./Chat.css";
 
 interface ChatMessage {
@@ -59,30 +58,60 @@ export default function Chat() {
   const [providerInfo, setProviderInfo] = useState<ProviderInfo | null>(null);
   const [showProviderConfig, setShowProviderConfig] = useState(false);
 
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+
   const sessionIdRef = useRef<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
+    // `cancelled` guards against React StrictMode's dev-mode
+    // mount→cleanup→remount: if cleanup runs before create_session resolves,
+    // sessionIdRef.current is still null (nothing for the cleanup below to
+    // close), so the just-created session would otherwise leak — orphaned in
+    // agent_sessions with no ended_at. Catching that here closes it directly
+    // instead of relying on the ref having already been set.
+    let cancelled = false;
     invoke<string>("create_session", { mode }).then((id) => {
+      if (cancelled) {
+        invoke("close_session", { sessionId: id });
+        return;
+      }
       sessionIdRef.current = id;
       setSessionId(id);
     });
 
     return () => {
+      cancelled = true;
       if (sessionIdRef.current) {
         invoke("close_session", { sessionId: sessionIdRef.current });
+        sessionIdRef.current = null;
       }
     };
   }, [mode]);
 
   useEffect(() => {
+    // Same StrictMode race as above: `listen()` resolves asynchronously, so
+    // if cleanup runs first, unlistenRef.current is still null and the
+    // subscription registered by the resolving promise would otherwise leak
+    // and duplicate every streamed token. `cancelled` catches that case and
+    // unregisters it immediately instead of only relying on the ref.
+    let cancelled = false;
     listen<string>("chat-stream-delta", (event) => {
       setStreamingText((prev) => (prev ?? "") + event.payload);
     }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
       unlistenRef.current = unlisten;
     });
     return () => {
+      cancelled = true;
       unlistenRef.current?.();
+      unlistenRef.current = null;
     };
   }, []);
 
@@ -90,7 +119,28 @@ export default function Chat() {
     if (mode === "hybrid") {
       loadProviderInfo(providerForm.provider);
     }
+    // Intentionally re-runs only on switching into "hybrid" mode, not on
+    // every keystroke in the provider config form — `saveProvider` already
+    // reloads provider info after an edit is actually submitted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  // Releases the microphone if this screen unmounts (e.g. the user
+  // navigates away) while a recording is still in progress — otherwise the
+  // MediaStream/MediaRecorder are orphaned and the mic keeps recording with
+  // nothing left able to stop it. Bypasses the normal onstop transcription
+  // flow (no point starting an async transcription for a component that's
+  // already gone).
+  useEffect(() => {
+    return () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.onstop = null;
+        recorder.stream.getTracks().forEach((t) => t.stop());
+        recorder.stop();
+      }
+    };
+  }, []);
 
   function loadProviderInfo(provider: string) {
     invoke<ProviderInfo | null>("get_provider_credentials", { provider }).then((info) => {
@@ -194,6 +244,70 @@ export default function Chat() {
     }
   }
 
+  async function resampleTo16kMono(buffer: AudioBuffer): Promise<Float32Array> {
+    const targetRate = 16000;
+    if (buffer.sampleRate === targetRate && buffer.numberOfChannels === 1) {
+      return buffer.getChannelData(0);
+    }
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(buffer.duration * targetRate), targetRate);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+    const rendered = await offlineCtx.startRendering();
+    return rendered.getChannelData(0);
+  }
+
+  async function toggleRecording() {
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      setRecording(false);
+      return;
+    }
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setTranscribing(true);
+        try {
+          const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
+          const arrayBuffer = await blob.arrayBuffer();
+          const audioCtx = new AudioContext();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const samples = await resampleTo16kMono(audioBuffer);
+          await audioCtx.close();
+          const text = await invoke<string>("transcribe_audio", { samples: Array.from(samples) });
+          if (text.trim()) {
+            setInput((prev) => (prev ? `${prev} ${text.trim()}` : text.trim()));
+          }
+        } catch (e) {
+          setError(String(e));
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setRecording(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function speak(text: string) {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "es-ES";
+    window.speechSynthesis.speak(utterance);
+  }
+
   return (
     <div className="chat">
       <div className="chat-mode">
@@ -243,18 +357,27 @@ export default function Chat() {
               <input
                 placeholder="Base URL"
                 value={providerForm.baseUrl}
-                onChange={(e) => setProviderForm((f) => ({ ...f, baseUrl: e.currentTarget.value }))}
+                onChange={(e) => {
+                  const baseUrl = e.currentTarget.value;
+                  setProviderForm((f) => ({ ...f, baseUrl }));
+                }}
               />
               <input
                 placeholder="Modelo (ej. llama-3.3-70b-versatile)"
                 value={providerForm.model}
-                onChange={(e) => setProviderForm((f) => ({ ...f, model: e.currentTarget.value }))}
+                onChange={(e) => {
+                  const model = e.currentTarget.value;
+                  setProviderForm((f) => ({ ...f, model }));
+                }}
               />
               <input
                 type="password"
                 placeholder="API key"
                 value={providerForm.apiKey}
-                onChange={(e) => setProviderForm((f) => ({ ...f, apiKey: e.currentTarget.value }))}
+                onChange={(e) => {
+                  const apiKey = e.currentTarget.value;
+                  setProviderForm((f) => ({ ...f, apiKey }));
+                }}
               />
               <button type="submit">Guardar</button>
               {providerForm.provider === "groq" && (
@@ -271,6 +394,11 @@ export default function Chat() {
         {messages.map((m, i) => (
           <div key={i} className={`chat-bubble chat-${m.role}`}>
             <p>{m.content}</p>
+            {m.role === "assistant" && (
+              <button className="chat-speak" onClick={() => speak(m.content)} title="Escuchar">
+                🔊
+              </button>
+            )}
             {m.sources && (
               <details className="chat-sources">
                 <summary>Fuentes usadas</summary>
@@ -311,20 +439,29 @@ export default function Chat() {
 
       {!(mode === "hybrid" && preview) && (
         <div className="chat-input">
+          <button
+            className={recording ? "chat-mic recording" : "chat-mic"}
+            onClick={toggleRecording}
+            disabled={busy || transcribing}
+            title={recording ? "Detener grabación" : "Grabar mensaje de voz"}
+          >
+            {recording ? "⏹" : "🎤"}
+          </button>
           <input
             value={input}
             onChange={(e) => setInput(e.currentTarget.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !busy) {
-                mode === "hybrid" ? requestHybridPreview() : sendSimpleOrRag();
+                if (mode === "hybrid") requestHybridPreview();
+                else sendSimpleOrRag();
               }
             }}
-            placeholder="Escribí un mensaje…"
-            disabled={busy}
+            placeholder={transcribing ? "Transcribiendo…" : "Escribí un mensaje…"}
+            disabled={busy || transcribing}
           />
           <button
             onClick={mode === "hybrid" ? requestHybridPreview : sendSimpleOrRag}
-            disabled={busy || !input.trim()}
+            disabled={busy || transcribing || !input.trim()}
           >
             {mode === "hybrid" ? "Ver preview" : "Enviar"}
           </button>

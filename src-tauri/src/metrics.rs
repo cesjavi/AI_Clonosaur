@@ -30,7 +30,8 @@ pub fn get_metrics(state: State<DbState>) -> Result<Metrics, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     let count = |sql: &str| -> Result<i64, String> {
-        conn.query_row(sql, [], |row| row.get(0)).map_err(|e| e.to_string())
+        conn.query_row(sql, [], |row| row.get(0))
+            .map_err(|e| e.to_string())
     };
     let count_status = |table: &str, status: &str| -> Result<i64, String> {
         conn.query_row(

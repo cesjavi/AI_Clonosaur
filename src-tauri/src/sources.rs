@@ -36,7 +36,8 @@ pub fn list_sources(state: State<DbState>) -> Result<Vec<SourceSummary>, String>
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -73,14 +74,19 @@ pub fn list_people(state: State<DbState>) -> Result<Vec<PersonSummary>, String> 
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Excluding a contact removes them from the clone's memory: the RAG chat and the
 /// copilot stop citing their messages (see `chat::build_rag_messages` and
 /// `copilot::generate_draft`).
 #[tauri::command]
-pub fn set_person_excluded(state: State<DbState>, person_id: String, excluded: bool) -> Result<(), String> {
+pub fn set_person_excluded(
+    state: State<DbState>,
+    person_id: String,
+    excluded: bool,
+) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE people SET excluded = ?1 WHERE id = ?2",

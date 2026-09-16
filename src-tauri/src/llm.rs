@@ -133,8 +133,9 @@ pub fn parse_json_array<T: DeserializeOwned>(raw: &str) -> Result<Vec<T>, String
     let start = raw.find('[');
     let end = raw.rfind(']');
     match (start, end) {
-        (Some(s), Some(e)) if e >= s => serde_json::from_str(&raw[s..=e])
-            .map_err(|err| format!("no se pudo interpretar la respuesta del modelo como JSON: {err}")),
+        (Some(s), Some(e)) if e >= s => serde_json::from_str(&raw[s..=e]).map_err(|err| {
+            format!("no se pudo interpretar la respuesta del modelo como JSON: {err}")
+        }),
         _ => Err("el modelo no devolvió un array JSON reconocible".to_string()),
     }
 }

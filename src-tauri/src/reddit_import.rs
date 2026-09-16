@@ -3,6 +3,19 @@ use tauri::State;
 use crate::db::DbState;
 use crate::import_common::{self, ImportSummary};
 
+/// Reddit's `posts.csv` has both a title and a body (self-text posts can have
+/// an empty body); `comments.csv` only has a body. Joins whichever of the two
+/// are present with a blank line between them; `None` if both are empty
+/// (nothing worth importing for that row).
+fn combine_title_body(title: &str, body: &str) -> Option<String> {
+    match (title.is_empty(), body.is_empty()) {
+        (false, false) => Some(format!("{title}\n\n{body}")),
+        (false, true) => Some(title.to_string()),
+        (true, false) => Some(body.to_string()),
+        (true, true) => None,
+    }
+}
+
 /// Reddit exports `comments.csv` and `posts.csv` with different schemas; which
 /// one it is gets detected by the presence of the 'title' column (only in posts).
 /// Same as Twitter/Discord, the content is assumed to be the user's own.
@@ -37,7 +50,7 @@ pub fn import_reddit_file(state: State<DbState>, path: String) -> Result<ImportS
         &source_id,
         "reddit",
         &file_name,
-        Some(&file_name.to_lowercase()),
+        Some(&import_common::fingerprint_file_name(&file_name)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -49,11 +62,9 @@ pub fn import_reddit_file(state: State<DbState>, path: String) -> Result<ImportS
         let title = title_idx.and_then(|i| row.get(i)).unwrap_or("").trim();
         let body = body_idx.and_then(|i| row.get(i)).unwrap_or("").trim();
 
-        let text = match (title.is_empty(), body.is_empty()) {
-            (false, false) => format!("{title}\n\n{body}"),
-            (false, true) => title.to_string(),
-            (true, false) => body.to_string(),
-            (true, true) => continue,
+        let text = match combine_title_body(title, body) {
+            Some(t) => t,
+            None => continue,
         };
 
         let timestamp = import_common::normalize_timestamp(row.get(date_idx).unwrap_or(""));
@@ -82,4 +93,39 @@ pub fn import_reddit_file(state: State<DbState>, path: String) -> Result<ImportS
         duplicates,
         participants: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combines_title_and_body_when_both_present() {
+        assert_eq!(
+            combine_title_body("My post title", "the body text"),
+            Some("My post title\n\nthe body text".to_string())
+        );
+    }
+
+    #[test]
+    fn uses_title_alone_when_body_is_empty() {
+        assert_eq!(
+            combine_title_body("Just a title", ""),
+            Some("Just a title".to_string())
+        );
+    }
+
+    #[test]
+    fn uses_body_alone_when_title_is_empty() {
+        // comments.csv rows have no title column at all.
+        assert_eq!(
+            combine_title_body("", "just a comment"),
+            Some("just a comment".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_both_are_empty() {
+        assert_eq!(combine_title_body("", ""), None);
+    }
 }

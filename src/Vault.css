@@ -1,0 +1,92 @@
+.vault-lock-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  text-align: center;
+}
+
+.vault-lock-screen form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 320px;
+}
+
+.vault-lock-screen h1 {
+  font-size: 1.3rem;
+  margin: 0;
+}
+
+.vault-lock-screen input {
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+}
+
+.vault-security {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #ccc;
+}
+
+.vault-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 360px;
+  margin-top: 0.5rem;
+}
+
+.vault-form input {
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+}
+
+.vault-hint {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.vault-message {
+  color: #2ecc71;
+  font-size: 0.85rem;
+}
+
+.vault-error {
+  color: #c0392b;
+  font-size: 0.85rem;
+}
+
+.vault-danger {
+  margin-top: 1.5rem;
+}
+
+.vault-danger h3 {
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
+.vault-danger-button {
+  background-color: #c0392b;
+  color: white;
+  border: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vault-lock-screen input,
+  .vault-form input {
+    background-color: #1f1f1f;
+    color: #f6f6f6;
+    border-color: #444;
+  }
+
+  .vault-security {
+    border-top-color: #444;
+  }
+}

@@ -76,6 +76,13 @@ and it persists after reloading the page.
 
 ## 4. Phase W2 — Porting the commands (same order as PLAN_TECNICO.md)
 
+**Status: complete**, including voice (`transcribe_audio`/`download_whisper_model`
+— see Phase W7: ported via `@huggingface/transformers` running Whisper as
+ONNX/WASM in a dedicated Worker, not the whisper.cpp port originally assumed
+necessary). Every Rust command has a TypeScript counterpart wired into
+`invoke.ts`'s `PORTED_COMMANDS`, including `copilot.ts` (drafts), the last
+module ported before voice.
+
 **Goal:** port each Rust module to its TypeScript equivalent, without
 changing logic or signature.
 
@@ -103,6 +110,9 @@ candidate memories with evidence, etc.).
 
 ## 5. Phase W3 — Ollama from the browser
 
+**Status: implemented** (`llm.ts`'s `fetchLocalEngine`), **not yet verified
+against a real CORS-blocked Ollama instance** — same caveat as W4/W6 below.
+
 **Goal:** get local chat working the same way as on desktop.
 
 - **Real CORS blocker:** a browser can't hit
@@ -111,28 +121,65 @@ candidate memories with evidence, etc.).
   Document this explicitly in the README — it's the same problem Open
   WebUI and similar projects have, it's not specific to Clonosaur.
 - Without this, "Simple chat" and "Chat with memory" will never be able to
-  connect, so it's worth detecting the connection failure and showing
-  concrete instructions in the UI (not just a generic network error).
+  connect, so `fetchLocalEngine` detects the failed `fetch` (a `TypeError`,
+  indistinguishable from "engine is down" in JS) and appends the
+  `OLLAMA_ORIGINS` fix to the error shown in the UI, instead of a bare
+  network error. Only shown in the browser build (`isTauri()` false) since
+  the desktop webview has no CORS restriction to begin with.
 
 **Done when:** simple chat and chat with RAG respond against a local Ollama
 with `OLLAMA_ORIGINS` configured.
 
 ## 6. Phase W4 — Encryption at rest (simpler than in Tauri)
 
+**Status: implemented** (`vaultCrypto.ts`, `vault.ts`, `db.worker.ts`).
+Diverged from the original plan below in two ways once implementation hit
+real constraints — noted inline.
+
 **Goal:** the database encrypted in OPFS, with a master password.
 
 - `crypto.subtle.encrypt`/`decrypt` with AES-256-GCM — native to the
   browser, no external crate.
-- Key derivation: Argon2id via `hash-wasm` (small WASM, doesn't drag in a
-  heavy runtime).
-- Same pattern as the original plan: the file in OPFS stays encrypted
-  at all times; when unlocking, it's decrypted into an in-memory buffer
-  that `wa-sqlite` uses as a working copy; "Lock now" re-encrypts and
-  discards the buffer. No password recovery, documented the same as today.
+- Key derivation: **PBKDF2-SHA256 (600k iterations), not Argon2id/`hash-wasm`
+  as originally planned.** WebCrypto has no native Argon2, and pulling in a
+  WASM Argon2 library for this one feature would add a new dependency and an
+  unverified parsing surface. PBKDF2 is a native browser primitive OWASP
+  still rates as acceptable for this threat model (protecting a local file,
+  not an online-guessing target).
+- **Mechanism ended up different from "decrypt into a working copy `wa-sqlite`
+  uses on disk"**: this build of `wa-sqlite` has no `sqlite3_serialize`/
+  `deserialize` bindings, so there's no way to hand it a raw byte buffer to
+  treat as a database file the way the original plan assumed. Instead, the
+  live database while unlocked runs entirely from `wa-sqlite`'s in-memory
+  `MemoryVFS` example (no OPFS-backed working copy at all — arguably stronger
+  than the original plan, since no plaintext ever touches disk, not even
+  transiently); getting bytes in and out uses `VACUUM INTO` targeting that
+  VFS by name, SQLite's own supported mechanism for copying a database to an
+  arbitrary destination. The tradeoff: unlocking only lasts for the current
+  page session (a reload always re-locks, since there's no OPFS-visible
+  "still unlocked" signal to check on a fresh load) — locking itself still
+  works instantly without closing the tab, per the original goal.
 
 **Done when:** the database only exists encrypted on disk (OPFS) outside
 of an unlocked session, and "Lock now" works without having to close the
-tab.
+tab. **Verified end-to-end in a real (headless) browser**: setup → lock →
+reload → unlock → data still there, with OPFS holding only
+`clonosaur.vault.json` + `clonosaur.db.enc` (no plaintext pool directory)
+both right after locking and after a subsequent unlock.
+
+That manual pass caught a real bug the unit tests and typecheck had missed:
+`exportSnapshot()`'s `VACUUM INTO 'file:export.db?vfs=memory'` silently
+produced nothing — this wasm build's URI handling doesn't strip the
+`?vfs=memory` query string before handing the name to the target VFS's
+`xOpen`, so the exported file landed under the literal key
+`"export.db?vfs=memory"` in `MemoryVFS`'s map instead of `"export.db"`,
+which the old exact-match lookup never found. Every `setup_master_password`
+and `lock_vault` call was failing outright before this fix. Fixed in
+`db.worker.ts` by opening the database connection with `SQLITE_OPEN_URI`
+(without it, SQLite doesn't even attempt to parse the `file:` URI, so the
+"vfs=memory" routing wouldn't have worked at all) and matching the export
+file by key *prefix* instead of exact name, since the exact mangled string
+isn't something to depend on.
 
 ## 7. Phase W5 — Remote access: end-to-end encrypted sync
 
@@ -157,6 +204,25 @@ download+decrypt it from another, with the master password as the only
 secret that unlocks the data.
 
 ## 8. Phase W6 — PWA (installable, works offline)
+
+**Status: implemented** (`vite-plugin-pwa` in `vite.config.ts`) **and
+verified in a real (headless) browser** against a production build served
+over `vite preview`: `manifest.webmanifest` serves with
+`content-type: application/manifest+json` and valid icon entries, and the
+service worker registers and reaches `activated` state with zero console
+errors. ("Install app" itself is a native browser UI affordance that can't
+be triggered from an automated script — the underlying requirements for it
+to appear, a valid manifest and an active service worker, are both
+confirmed.)
+
+The plugin is active **only for the standalone web build**, not the Tauri
+desktop one (`isTauriBuild` check in `vite.config.ts`, keyed off the
+`TAURI_ENV_PLATFORM` env var Tauri's CLI sets when it invokes this build) —
+a service worker precaching the JS bundle inside the desktop webview would
+risk serving stale assets after `tauri-plugin-updater` replaces the app on
+disk, undermining the auto-update feature entirely. Verified: building with
+`TAURI_ENV_PLATFORM` set produces no `sw.js`/manifest, building without it
+does.
 
 **Goal:** make it feel like an app, not a tab.
 

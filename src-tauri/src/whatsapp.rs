@@ -81,7 +81,11 @@ fn parse_whatsapp_timestamp(date_str: &str, time_str: &str) -> Option<String> {
 
     let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
     let time = chrono::NaiveTime::from_hms_opt(hour, minute, second)?;
-    Some(chrono::NaiveDateTime::new(date, time).and_utc().to_rfc3339())
+    Some(
+        chrono::NaiveDateTime::new(date, time)
+            .and_utc()
+            .to_rfc3339(),
+    )
 }
 
 fn parse_header_datetime(header: &str) -> Option<String> {
@@ -190,8 +194,8 @@ pub fn import_whatsapp_file(state: State<DbState>, path: String) -> Result<Impor
     let mut duplicates = 0usize;
 
     for msg in parsed {
-        let person_id = import_common::get_or_create_person(&conn, &msg.author)
-            .map_err(|e| e.to_string())?;
+        let person_id =
+            import_common::get_or_create_person(&conn, &msg.author).map_err(|e| e.to_string())?;
         import_common::ensure_participant(&conn, &conversation_id, &person_id)
             .map_err(|e| e.to_string())?;
 

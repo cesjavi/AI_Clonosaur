@@ -3,6 +3,13 @@ use tauri::State;
 use crate::db::DbState;
 use crate::import_common::{self, ImportSummary};
 
+/// Case-insensitive header lookup: Discord's CSV exporters aren't
+/// consistent about capitalization ("Timestamp" vs "timestamp") across
+/// versions/locales, so an exact match would silently reject valid exports.
+fn find_column_ci(headers: &csv::StringRecord, name: &str) -> Option<usize> {
+    headers.iter().position(|h| h.eq_ignore_ascii_case(name))
+}
+
 /// The per-channel Discord export (`messages.csv`) is treated as the user's
 /// own content, same as Twitter/Reddit, to simplify the MVP: no attempt is
 /// made to distinguish speakers within the CSV.
@@ -11,13 +18,12 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut reader = csv::ReaderBuilder::new().from_reader(content.as_bytes());
     let headers = reader.headers().map_err(|e| e.to_string())?.clone();
-    let find = |name: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(name));
 
-    let timestamp_idx = find("Timestamp")
-        .or_else(|| find("Date"))
+    let timestamp_idx = find_column_ci(&headers, "Timestamp")
+        .or_else(|| find_column_ci(&headers, "Date"))
         .ok_or("el CSV necesita una columna 'Timestamp' o 'Date'")?;
-    let contents_idx = find("Contents")
-        .or_else(|| find("Content"))
+    let contents_idx = find_column_ci(&headers, "Contents")
+        .or_else(|| find_column_ci(&headers, "Content"))
         .ok_or("el CSV necesita una columna 'Contents' o 'Content'")?;
 
     let file_name = std::path::Path::new(&path)
@@ -33,7 +39,7 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
         &source_id,
         "discord",
         &file_name,
-        Some(&file_name.to_lowercase()),
+        Some(&import_common::fingerprint_file_name(&file_name)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -72,4 +78,37 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
         duplicates,
         participants: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_a_column_case_insensitively() {
+        let headers = csv::StringRecord::from(vec!["AUTHOR", "Timestamp", "Contents"]);
+        assert_eq!(find_column_ci(&headers, "timestamp"), Some(1));
+        assert_eq!(find_column_ci(&headers, "CONTENTS"), Some(2));
+    }
+
+    #[test]
+    fn returns_none_for_a_missing_column() {
+        let headers = csv::StringRecord::from(vec!["AUTHOR", "Date"]);
+        assert_eq!(find_column_ci(&headers, "Timestamp"), None);
+    }
+
+    #[test]
+    fn falls_back_to_the_alternate_column_name() {
+        // Older Discord exports use "Date"/"Content" instead of
+        // "Timestamp"/"Contents" — the .or_else() fallback chain in
+        // import_discord_file relies on find_column_ci returning None
+        // (not panicking) for the missing primary name.
+        let headers = csv::StringRecord::from(vec!["Author", "Date", "Content"]);
+        let timestamp_idx =
+            find_column_ci(&headers, "Timestamp").or_else(|| find_column_ci(&headers, "Date"));
+        let contents_idx =
+            find_column_ci(&headers, "Contents").or_else(|| find_column_ci(&headers, "Content"));
+        assert_eq!(timestamp_idx, Some(1));
+        assert_eq!(contents_idx, Some(2));
+    }
 }

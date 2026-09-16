@@ -13,6 +13,39 @@ pub struct ImportSummary {
     pub participants: Vec<String>,
 }
 
+/// Normalizes a downloaded file's name into a stable conversation
+/// fingerprint by stripping the "(1)", "(2)", etc. suffix browsers/OSes
+/// append to avoid overwriting a file that already exists on a re-download.
+/// Without this, every re-download of the same export (very common — Gmail
+/// Takeout, Discord/Reddit exports) looks like a brand new conversation and
+/// duplicates every message already imported from it.
+///
+/// Trade-off, accepted deliberately: the OS appends the same "(1)" suffix on
+/// *any* same-directory name collision, not only on a re-download of the
+/// identical file — e.g. two different Discord servers both exported as
+/// "general.csv" would have the second saved as "general (1).csv" and get
+/// merged into one conversation here. Re-download deduping (the common case)
+/// was judged more valuable than guarding against that rarer collision;
+/// fixing both would need matching by content (e.g. participants/first
+/// message), not just the file name.
+pub fn fingerprint_file_name(file_name: &str) -> String {
+    let lower = file_name.to_lowercase();
+    let (stem, ext) = match lower.rfind('.') {
+        Some(i) => (&lower[..i], &lower[i..]),
+        None => (lower.as_str(), ""),
+    };
+    let trimmed = stem.trim_end();
+    if trimmed.ends_with(')') {
+        if let Some(open) = trimmed.rfind('(') {
+            let inner = &trimmed[open + 1..trimmed.len() - 1];
+            if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                return format!("{}{}", trimmed[..open].trim_end(), ext);
+            }
+        }
+    }
+    lower
+}
+
 pub fn create_source(conn: &Connection, kind: &str, file_name: &str) -> rusqlite::Result<String> {
     let id = Uuid::new_v4().to_string();
     conn.execute(
@@ -133,7 +166,8 @@ pub fn normalize_timestamp(raw: &str) -> String {
 
     // Reddit: "YYYY-MM-DD HH:MM:SS UTC"
     if let Some(stripped) = raw.strip_suffix("UTC") {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(stripped.trim(), "%Y-%m-%d %H:%M:%S") {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(stripped.trim(), "%Y-%m-%d %H:%M:%S")
+        {
             return dt.and_utc().to_rfc3339();
         }
     }
@@ -181,4 +215,111 @@ pub fn insert_message_if_new(
         ],
     )?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+
+    fn assert_utc_datetime(result: &str, y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) {
+        let dt = chrono::DateTime::parse_from_rfc3339(result).expect("valid rfc3339 output");
+        let utc = dt.with_timezone(&Utc);
+        assert_eq!(
+            (utc.year(), utc.month(), utc.day()),
+            (y, mo, d),
+            "date mismatch in {result}"
+        );
+        assert_eq!(
+            (utc.hour(), utc.minute(), utc.second()),
+            (h, mi, s),
+            "time mismatch in {result}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_file_name_strips_numbered_suffix() {
+        assert_eq!(fingerprint_file_name("export (1).csv"), "export.csv");
+    }
+
+    #[test]
+    fn fingerprint_file_name_strips_suffix_with_no_space() {
+        assert_eq!(fingerprint_file_name("messages(2).csv"), "messages.csv");
+    }
+
+    #[test]
+    fn fingerprint_file_name_lowercases_with_no_suffix() {
+        assert_eq!(fingerprint_file_name("Messages.CSV"), "messages.csv");
+    }
+
+    #[test]
+    fn fingerprint_file_name_keeps_non_numeric_parenthetical() {
+        assert_eq!(
+            fingerprint_file_name("export (final).csv"),
+            "export (final).csv"
+        );
+    }
+
+    #[test]
+    fn fingerprint_file_name_handles_no_extension() {
+        assert_eq!(fingerprint_file_name("archive (3)"), "archive");
+    }
+
+    #[test]
+    fn normalize_timestamp_passes_through_rfc3339() {
+        assert_utc_datetime(
+            &normalize_timestamp("2024-03-04T10:15:00Z"),
+            2024,
+            3,
+            4,
+            10,
+            15,
+            0,
+        );
+    }
+
+    #[test]
+    fn normalize_timestamp_parses_discord_format() {
+        assert_utc_datetime(
+            &normalize_timestamp("03/04/2024 02:15 PM"),
+            2024,
+            3,
+            4,
+            14,
+            15,
+            0,
+        );
+    }
+
+    #[test]
+    fn normalize_timestamp_parses_reddit_format() {
+        assert_utc_datetime(
+            &normalize_timestamp("2024-03-04 10:15:00 UTC"),
+            2024,
+            3,
+            4,
+            10,
+            15,
+            0,
+        );
+    }
+
+    #[test]
+    fn normalize_timestamp_parses_plain_format() {
+        assert_utc_datetime(
+            &normalize_timestamp("2024-03-04 10:15:00"),
+            2024,
+            3,
+            4,
+            10,
+            15,
+            0,
+        );
+    }
+
+    #[test]
+    fn normalize_timestamp_falls_back_to_now_for_garbage_input() {
+        let result = normalize_timestamp("not a date");
+        assert!(chrono::DateTime::parse_from_rfc3339(&result).is_ok());
+    }
 }

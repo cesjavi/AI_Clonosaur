@@ -1,5 +1,12 @@
 # Roadmap: Clonosaur
 
+> **Status note:** this document describes the original product vision and
+> phased plan. Phases 1 through 5 below (local MVP, memory & search, more
+> sources, advanced personality, hybrid mode) are substantially implemented —
+> see [PLAN_TECNICO.md](PLAN_TECNICO.md) for what actually exists and how it's
+> built, including a test suite, CI, and release automation not described
+> here. Treat the phases below as historical intent, not a live status board.
+
 ## Vision
 
 Clonosaur is a local-first app for creating a personal agent based on the way a person thinks, writes, remembers, and decides. The goal is not to "copy a mind" literally, but to build a private virtual clone that represents the user's communication style, autobiographical memory, preferences, values, and reasoning patterns.

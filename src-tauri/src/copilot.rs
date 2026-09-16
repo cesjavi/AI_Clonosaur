@@ -46,9 +46,11 @@ pub async fn generate_draft(
                         .to_string(),
                 );
             }
-            conn.query_row("SELECT name FROM people WHERE id = ?1", params![pid], |row| {
-                row.get::<_, String>(0)
-            })
+            conn.query_row(
+                "SELECT name FROM people WHERE id = ?1",
+                params![pid],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(|e| e.to_string())?
         } else {
@@ -101,7 +103,8 @@ pub fn list_drafts(state: State<DbState>) -> Result<Vec<Draft>, String> {
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

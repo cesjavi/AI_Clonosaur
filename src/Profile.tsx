@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend/invoke";
 import "./Profile.css";
 
 interface ProfileTrait {
@@ -32,7 +32,16 @@ export default function Profile() {
       .finally(() => setLoading(false));
   }
 
-  useEffect(load, []);
+  // Doesn't call the shared `load()` directly: `loading` already starts as
+  // `true` (see useState above), so the synchronous `setLoading(true)` it
+  // does is redundant here and triggers an extra render pass on mount.
+  // `load()` is still used as-is by the event handlers below, where
+  // re-arming the loading state before a refetch is the point.
+  useEffect(() => {
+    invoke<ProfileTrait[]>("list_profile_traits")
+      .then(setTraits)
+      .finally(() => setLoading(false));
+  }, []);
 
   function resetForm() {
     setCategory("");

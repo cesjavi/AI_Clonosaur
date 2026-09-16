@@ -30,7 +30,8 @@ pub async fn detect_contradictions(state: State<'_, DbState>) -> Result<usize, S
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
     };
 
     if memories.len() < 2 {

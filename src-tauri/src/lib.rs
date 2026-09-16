@@ -22,13 +22,16 @@ mod sessions;
 mod settings;
 mod sources;
 mod tone_model;
+mod transcription;
 mod twitter_import;
 mod values_model;
+mod vault;
 mod whatsapp;
 
 use db::DbState;
 use std::sync::Mutex;
 use tauri::Manager;
+use transcription::TranscriptionState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,8 +39,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Desktop-only: the updater plugin doesn't build for mobile
+            // targets, and this app has no mobile target configured.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
+
             let conn = db::init_db(app.handle());
             app.manage(DbState(Mutex::new(conn)));
+            app.manage(TranscriptionState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -90,6 +103,14 @@ pub fn run() {
             deletion::delete_by_date_range,
             settings::get_settings,
             settings::update_setting,
+            transcription::list_whisper_models,
+            transcription::download_whisper_model,
+            transcription::transcribe_audio,
+            vault::get_vault_status,
+            vault::setup_master_password,
+            vault::unlock_vault,
+            vault::lock_vault,
+            vault::reset_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

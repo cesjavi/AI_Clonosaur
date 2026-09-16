@@ -21,7 +21,9 @@ pub struct InterviewAnswer {
 pub fn get_interview_answers(state: State<DbState>) -> Result<Vec<InterviewAnswer>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT module, question_id, question_text, answer, updated_at FROM interview_answers")
+        .prepare(
+            "SELECT module, question_id, question_text, answer, updated_at FROM interview_answers",
+        )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
@@ -36,7 +38,8 @@ pub fn get_interview_answers(state: State<DbState>) -> Result<Vec<InterviewAnswe
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Persists a single answer. Called when leaving each field (blur),

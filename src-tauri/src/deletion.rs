@@ -28,7 +28,10 @@ pub fn delete_by_source(state: State<DbState>, source_id: String) -> Result<usiz
     .map_err(|e| e.to_string())?;
 
     let deleted = conn
-        .execute("DELETE FROM messages WHERE source_id = ?1", params![source_id])
+        .execute(
+            "DELETE FROM messages WHERE source_id = ?1",
+            params![source_id],
+        )
         .map_err(|e| e.to_string())?;
 
     // Conversations left without any message (orphaned from this source) are
@@ -76,7 +79,10 @@ pub fn delete_by_contact(state: State<DbState>, person_id: String) -> Result<usi
     .map_err(|e| e.to_string())?;
 
     let deleted = conn
-        .execute("DELETE FROM messages WHERE person_id = ?1", params![person_id])
+        .execute(
+            "DELETE FROM messages WHERE person_id = ?1",
+            params![person_id],
+        )
         .map_err(|e| e.to_string())?;
 
     conn.execute(
@@ -100,7 +106,11 @@ pub fn delete_by_contact(state: State<DbState>, person_id: String) -> Result<usi
 
 /// `from`/`to` are ISO8601 timestamps (same format as `messages.timestamp`).
 #[tauri::command]
-pub fn delete_by_date_range(state: State<DbState>, from: String, to: String) -> Result<usize, String> {
+pub fn delete_by_date_range(
+    state: State<DbState>,
+    from: String,
+    to: String,
+) -> Result<usize, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     conn.execute(

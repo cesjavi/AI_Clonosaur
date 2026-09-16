@@ -153,6 +153,50 @@
   border: 1px solid #ccc;
 }
 
+.chat-mic {
+  border-radius: 50%;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.chat-mic.recording {
+  background-color: #c0392b;
+  color: white;
+  animation: chat-mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes chat-mic-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(192, 57, 43, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(192, 57, 43, 0);
+  }
+}
+
+.chat-speak {
+  margin-top: 0.35rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.9rem;
+  opacity: 0.7;
+  padding: 0;
+}
+
+.chat-speak:hover {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-mic.recording {
+    animation: none;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   .chat-bubble {
     background-color: rgba(255, 255, 255, 0.08);

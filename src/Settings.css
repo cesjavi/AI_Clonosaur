@@ -32,11 +32,73 @@
   font-size: 0.85rem;
 }
 
+.settings-voice {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #ccc;
+}
+
+.settings-voice h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.settings-voice-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.settings-voice-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.settings-voice-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.9rem;
+}
+
+.settings-voice-installed {
+  color: #2ecc71;
+  font-size: 0.85rem;
+}
+
+.settings-updates {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #ccc;
+}
+
+.settings-updates h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.settings-update-notes {
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  opacity: 0.85;
+  background-color: rgba(0, 0, 0, 0.04);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+}
+
 @media (prefers-color-scheme: dark) {
   .settings input,
   .settings select {
     background-color: #1f1f1f;
     color: #f6f6f6;
     border-color: #444;
+  }
+
+  .settings-voice {
+    border-top-color: #444;
   }
 }

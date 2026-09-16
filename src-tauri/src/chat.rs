@@ -30,7 +30,9 @@ misma. Si te preguntan directamente si sos real, decilo con claridad.",
         )
         .map_err(|e| e.to_string())?;
     let rules = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -188,7 +190,10 @@ struct OpenAiChatResponse {
 
 /// Non-streaming chat against the configured local engine (Ollama or
 /// OpenAI-compatible, e.g. Lemonade Server — see `settings::DEFAULT_LOCAL_API_STYLE`).
-pub(crate) async fn call_ollama_chat(db: &DbState, messages: &[ChatMessage]) -> Result<String, String> {
+pub(crate) async fn call_ollama_chat(
+    db: &DbState,
+    messages: &[ChatMessage],
+) -> Result<String, String> {
     let base_url = settings::get_setting_from_db(db, "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
     let model = settings::get_setting_from_db(db, "chat_model", DEFAULT_CHAT_MODEL);
     let style = settings::get_setting_from_db(db, "local_api_style", DEFAULT_LOCAL_API_STYLE);
@@ -404,9 +409,11 @@ pub async fn send_chat_stream(
         (m, None)
     };
 
-    let base_url = settings::get_setting_from_db(state.inner(), "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
+    let base_url =
+        settings::get_setting_from_db(state.inner(), "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
     let model = settings::get_setting_from_db(state.inner(), "chat_model", DEFAULT_CHAT_MODEL);
-    let style = settings::get_setting_from_db(state.inner(), "local_api_style", DEFAULT_LOCAL_API_STYLE);
+    let style =
+        settings::get_setting_from_db(state.inner(), "local_api_style", DEFAULT_LOCAL_API_STYLE);
     let is_openai_style = style == "openai";
 
     let client = reqwest::Client::new();
@@ -415,7 +422,11 @@ pub async fn send_chat_stream(
         messages: &messages,
         stream: true,
     };
-    let endpoint = if is_openai_style { "chat/completions" } else { "api/chat" };
+    let endpoint = if is_openai_style {
+        "chat/completions"
+    } else {
+        "api/chat"
+    };
     let res = client
         .post(format!("{base_url}/{endpoint}"))
         .json(&body)

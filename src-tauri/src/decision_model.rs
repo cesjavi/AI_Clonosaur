@@ -28,7 +28,9 @@ fn gather_decision_evidence(conn: &Connection) -> Result<String, String> {
         )
         .map_err(|e| e.to_string())?;
     let answers = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
