@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["rt"] }
 futures-util = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 csv = "1"
-base64 = "0.22"
+base64 = "0.23"
 quoted_printable = "0.4"
 whisper-rs = "0.16"
 aes-gcm = "0.10"
