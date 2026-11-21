@@ -99,7 +99,15 @@ pub(crate) async fn build_rag_messages(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT content FROM memories WHERE status IN ('confirmed','edited') ORDER BY created_at DESC LIMIT 20",
+                "SELECT mem.content FROM memories mem
+                 WHERE mem.status IN ('confirmed','edited')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages ms
+                   LEFT JOIN people p ON p.id = ms.person_id
+                   WHERE ms.id = mem.source_message_id
+                     AND (ms.sensitivity = 'sensible' OR p.excluded = 1)
+                 )
+                 ORDER BY mem.created_at DESC LIMIT 20",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -118,17 +126,28 @@ pub(crate) async fn build_rag_messages(
 
     let mut messages_used = Vec::new();
     if !last_user_query.trim().is_empty() {
+        let embedding_model =
+            settings::get_setting_from_db(db, "embedding_model", settings::DEFAULT_EMBEDDING_MODEL);
+        let embedding_model =
+            settings::get_setting_from_db(db, "embedding_model", settings::DEFAULT_EMBEDDING_MODEL);
         if let Ok(query_vector) = memory::ollama_embed(db, &last_user_query).await {
             let conn = db.0.lock().map_err(|e| e.to_string())?;
-            if let Ok(top) = memory::find_similar_messages(&conn, &query_vector, 20, true) {
+            if let Ok(top) =
+                memory::find_similar_messages(&conn, &query_vector, &embedding_model, 20, true)
+            {
                 messages_used = top.into_iter().filter(|r| r.score > 0.0).take(5).collect();
             }
         }
     }
     if !messages_used.is_empty() {
-        system.push_str("\n\nMensajes relevantes tuyos:");
+        system.push_str("\n\nMensajes relevantes del historial:");
         for m in &messages_used {
-            system.push_str(&format!("\n- ({}) {}", m.timestamp, m.text));
+            let speaker = if m.is_user {
+                "Vos"
+            } else {
+                m.author.as_deref().unwrap_or("Contacto")
+            };
+            system.push_str(&format!("\n- ({}) [{}] {}", m.timestamp, speaker, m.text));
         }
     }
 
@@ -195,6 +214,7 @@ pub(crate) async fn call_ollama_chat(
     messages: &[ChatMessage],
 ) -> Result<String, String> {
     let base_url = settings::get_setting_from_db(db, "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
+    let base_url = base_url.trim_end_matches('/');
     let model = settings::get_setting_from_db(db, "chat_model", DEFAULT_CHAT_MODEL);
     let style = settings::get_setting_from_db(db, "local_api_style", DEFAULT_LOCAL_API_STYLE);
 
@@ -228,7 +248,11 @@ pub(crate) async fn call_ollama_chat(
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| {
+                crate::llm::strip_think_blocks(&c.message.content)
+                    .trim()
+                    .to_string()
+            })
             .ok_or_else(|| "el motor local no devolvió ninguna respuesta".to_string());
     }
 
@@ -250,7 +274,9 @@ pub(crate) async fn call_ollama_chat(
         .await
         .map_err(|e| format!("respuesta de chat de Ollama inesperada: {e}"))?;
 
-    Ok(parsed.message.content)
+    Ok(crate::llm::strip_think_blocks(&parsed.message.content)
+        .trim()
+        .to_string())
 }
 
 /// Chat without memory: doesn't touch profile/memories/messages, only carries
@@ -274,7 +300,7 @@ pub async fn ollama_chat(
     let reply = call_ollama_chat(state.inner(), &messages).await?;
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(last_user) = history.last() {
+    if let Some(last_user) = history.iter().rev().find(|m| m.role == "user") {
         sessions::record_turn(&conn, &session_id, "user", &last_user.content)?;
     }
     sessions::record_turn(&conn, &session_id, "assistant", &reply)?;
@@ -300,7 +326,7 @@ pub async fn chat_with_memory(
     let reply = call_ollama_chat(state.inner(), &messages).await?;
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(last_user) = history.last() {
+    if let Some(last_user) = history.iter().rev().find(|m| m.role == "user") {
         sessions::record_turn(&conn, &session_id, "user", &last_user.content)?;
     }
     sessions::record_turn(&conn, &session_id, "assistant", &reply)?;
@@ -374,6 +400,68 @@ impl ThinkStreamFilter {
 
         output
     }
+
+    fn flush(&mut self) -> (String, bool) {
+        if self.in_think {
+            self.buffer.clear();
+            self.in_think = false;
+            return (String::new(), true);
+        }
+        (std::mem::take(&mut self.buffer), false)
+    }
+}
+
+fn process_stream_line(
+    raw_line: &str,
+    is_openai_style: bool,
+    filter: &mut ThinkStreamFilter,
+    full_reply: &mut String,
+    app: &AppHandle,
+) -> Result<bool, String> {
+    let mut line = raw_line.trim();
+    if line.is_empty() {
+        return Ok(false);
+    }
+
+    if is_openai_style {
+        // Per the SSE spec, ignore comment lines (`: ...`) and non-data fields
+        // (`event:`, `id:`, `retry:`) instead of trying to JSON-parse them.
+        let Some(rest) = line.strip_prefix("data:") else {
+            return Ok(false);
+        };
+        line = rest.trim();
+        if line == "[DONE]" {
+            return Ok(true);
+        }
+    }
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("respuesta en streaming inválida: {e}"))?;
+
+    let content = if is_openai_style {
+        parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+    } else {
+        parsed
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+    };
+
+    if let Some(content) = content {
+        let visible = filter.push(content);
+        if !visible.is_empty() {
+            full_reply.push_str(&visible);
+            app.emit("chat-stream-delta", &visible)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(false)
 }
 
 #[derive(Serialize)]
@@ -411,6 +499,7 @@ pub async fn send_chat_stream(
 
     let base_url =
         settings::get_setting_from_db(state.inner(), "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
+    let base_url = base_url.trim_end_matches('/');
     let model = settings::get_setting_from_db(state.inner(), "chat_model", DEFAULT_CHAT_MODEL);
     let style =
         settings::get_setting_from_db(state.inner(), "local_api_style", DEFAULT_LOCAL_API_STYLE);
@@ -443,59 +532,59 @@ pub async fn send_chat_stream(
     let mut stream = res.bytes_stream();
     let mut filter = ThinkStreamFilter::new();
     let mut full_reply = String::new();
-    let mut leftover = String::new();
+    // Buffer raw bytes until '\n' (0x0A) so multi-byte UTF-8 characters split
+    // across TCP chunks are decoded intact instead of becoming U+FFFD.
+    let mut leftover: Vec<u8> = Vec::new();
+    let mut done = false;
 
     'outer: while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| e.to_string())?;
-        leftover.push_str(&String::from_utf8_lossy(&chunk));
+        leftover.extend_from_slice(&chunk);
 
-        while let Some(pos) = leftover.find('\n') {
-            let line: String = leftover.drain(..=pos).collect();
-            let mut line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            // OpenAI style sends Server-Sent Events: each line starts with
-            // "data: " and the stream ends with the "data: [DONE]" sentinel
-            // (which isn't valid JSON, so we must stop there instead of parsing it).
-            if is_openai_style {
-                line = line.trim_start_matches("data:").trim();
-                if line == "[DONE]" {
-                    break 'outer;
-                }
-            }
-
-            let parsed: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| format!("respuesta en streaming inválida: {e}"))?;
-
-            let content = if is_openai_style {
-                parsed
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
-                    .and_then(|c| c.as_str())
-            } else {
-                parsed
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-            };
-
-            if let Some(content) = content {
-                let visible = filter.push(content);
-                if !visible.is_empty() {
-                    full_reply.push_str(&visible);
-                    app.emit("chat-stream-delta", &visible)
-                        .map_err(|e| e.to_string())?;
-                }
+        while let Some(pos) = leftover.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = leftover.drain(..=pos).collect();
+            let raw_line = String::from_utf8_lossy(&line_bytes);
+            if process_stream_line(
+                &raw_line,
+                is_openai_style,
+                &mut filter,
+                &mut full_reply,
+                &app,
+            )? {
+                done = true;
+                break 'outer;
             }
         }
     }
 
+    if !done && !leftover.is_empty() {
+        let raw_line = String::from_utf8_lossy(&leftover);
+        let _ = process_stream_line(
+            &raw_line,
+            is_openai_style,
+            &mut filter,
+            &mut full_reply,
+            &app,
+        )?;
+    }
+
+    let (tail, truncated_in_think) = filter.flush();
+    if !tail.is_empty() {
+        full_reply.push_str(&tail);
+        app.emit("chat-stream-delta", &tail)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if full_reply.trim().is_empty() {
+        return Err(if truncated_in_think {
+            "el motor local cortó la respuesta dentro de un bloque de razonamiento <think> sin llegar a generar contenido visible".to_string()
+        } else {
+            "el motor local terminó de responder sin generar contenido".to_string()
+        });
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(last_user) = history.last() {
+    if let Some(last_user) = history.iter().rev().find(|m| m.role == "user") {
         sessions::record_turn(&conn, &session_id, "user", &last_user.content)?;
     }
     sessions::record_turn(&conn, &session_id, "assistant", &full_reply)?;

@@ -78,6 +78,14 @@ describe("parseCsv", () => {
       ["1", "2"],
     ]);
   });
+
+  it("strips UTF-8 BOM and keeps literal quotes inside unquoted fields", () => {
+    expect(parseCsv('\uFEFFa,b\nfoo "bar,baz\n1,2')).toEqual([
+      ["a", "b"],
+      ['foo "bar', "baz"],
+      ["1", "2"],
+    ]);
+  });
 });
 
 describe("createDuplicateChecker", () => {

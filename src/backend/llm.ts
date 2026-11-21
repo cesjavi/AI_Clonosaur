@@ -36,7 +36,8 @@ export async function fetchLocalEngine(
   const isOpenAiStyle = style === "openai";
   const engineLabel = isOpenAiStyle ? "el motor local" : "Ollama";
 
-  const res = await fetch(`${baseUrl}${path}`, {
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+  const res = await fetch(`${normalizedBaseUrl}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -83,14 +84,14 @@ export async function chatCompletionMessages(messages: LlmChatMessage[]): Promis
   );
 
   const content = isOpenAiStyle
-    ? (parsed as { choices?: { message?: { content?: string } }[] })?.choices?.[0]?.message?.content
-    : (parsed as { message?: { content?: string } })?.message?.content;
-  if (content === undefined) {
+    ? (parsed as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content
+    : (parsed as { message?: { content?: unknown } })?.message?.content;
+  if (typeof content !== "string") {
     throw new Error(
       isOpenAiStyle ? "el motor local no devolvió ninguna respuesta" : "respuesta de chat de Ollama inesperada",
     );
   }
-  return content;
+  return stripThinkBlocks(content).trim();
 }
 
 /** Non-streaming chat call against the configured local engine (Ollama or
@@ -98,6 +99,23 @@ export async function chatCompletionMessages(messages: LlmChatMessage[]): Promis
  * model's response (not parsed yet). */
 export async function chatCompletion(prompt: string): Promise<string> {
   return chatCompletionMessages([{ role: "user", content: prompt }]);
+}
+
+/** Removes `<think>...</think>` blocks emitted by reasoning models (as well as
+ * any truncated trailing `<think>...`). */
+export function stripThinkBlocks(raw: string): string {
+  let out = "";
+  let rest = raw;
+  for (;;) {
+    const start = rest.indexOf("<think>");
+    if (start === -1) break;
+    out += rest.slice(0, start);
+    const afterOpen = rest.slice(start + "<think>".length);
+    const end = afterOpen.indexOf("</think>");
+    if (end === -1) return out;
+    rest = afterOpen.slice(end + "</think>".length);
+  }
+  return out + rest;
 }
 
 /** Models sometimes return an "evidence" field as a string and
@@ -116,18 +134,30 @@ export function valueToText(v: unknown): string {
   return String(v);
 }
 
-/** Models often wrap the requested JSON in prose or ```json``` code blocks;
- * this trims to the first '[' and the last ']' before parsing instead of assuming
- * the response is pure JSON and failing the whole generator because of it. */
+/** Models often wrap the requested JSON in prose, `<think>` blocks, or
+ * ```json``` code blocks — and may cite `[0]`/`[1]` in preamble prose before
+ * the actual JSON array. Strips `<think>` blocks first, then tries candidate
+ * `[` starts against the last `]`. */
 export function parseJsonArray<T>(raw: string): T[] {
-  const start = raw.indexOf("[");
-  const end = raw.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) {
+  const cleaned = stripThinkBlocks(raw);
+  const end = cleaned.lastIndexOf("]");
+  if (end === -1) {
     throw new Error("el modelo no devolvió un array JSON reconocible");
   }
-  try {
-    return JSON.parse(raw.slice(start, end + 1)) as T[];
-  } catch (err) {
-    throw new Error(`no se pudo interpretar la respuesta del modelo como JSON: ${err}`, { cause: err });
+  let lastErr: unknown = null;
+  let foundBracket = false;
+  for (let i = 0; i <= end; i++) {
+    if (cleaned[i] !== "[") continue;
+    foundBracket = true;
+    try {
+      const parsed = JSON.parse(cleaned.slice(i, end + 1));
+      if (Array.isArray(parsed)) return parsed as T[];
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  if (!foundBracket) {
+    throw new Error("el modelo no devolvió un array JSON reconocible");
+  }
+  throw new Error(`no se pudo interpretar la respuesta del modelo como JSON: ${lastErr}`, { cause: lastErr });
 }

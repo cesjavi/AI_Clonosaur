@@ -7,7 +7,12 @@ import * as llm from "./llm";
 export async function generateTone(): Promise<number> {
   const convRows = await dbQuery(
     `SELECT c.id, c.title FROM conversations c
-     WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_user = 1)`,
+     WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_user = 1 AND m.sensitivity IS NOT 'sensible')
+     AND NOT EXISTS (
+       SELECT 1 FROM conversation_participants cp
+       JOIN people p ON p.id = cp.person_id
+       WHERE cp.conversation_id = c.id AND p.excluded = 1
+     )`,
   );
 
   const conversations: [string, string[]][] = [];

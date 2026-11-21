@@ -21,17 +21,28 @@ async function isExcluded(personId: string): Promise<boolean> {
  * If the recipient contact is excluded, the model isn't even called. */
 export async function generateDraft(contactPersonId: string | null, instruction: string): Promise<Draft> {
   let contactName: string | null = null;
+  let contactRelationship: string | null = null;
   if (contactPersonId) {
     if (await isExcluded(contactPersonId)) {
       throw new Error(
         "este contacto está marcado como excluido de la memoria del clon; no se genera ningún borrador para él",
       );
     }
-    const rows = await dbQuery("SELECT name FROM people WHERE id = ?", [contactPersonId]);
-    contactName = rows.length > 0 ? (rows[0].name as string) : null;
+    const rows = await dbQuery("SELECT name, relationship FROM people WHERE id = ?", [contactPersonId]);
+    if (rows.length === 0) {
+      throw new Error(`no existe el contacto seleccionado (${contactPersonId})`);
+    }
+    contactName = rows[0].name as string;
+    contactRelationship = (rows[0].relationship as string | null) ?? null;
   }
 
-  const history: chat.ChatMessage[] = [{ role: "user", content: instruction }];
+  const prompt = contactName
+    ? contactRelationship
+      ? `Destinatario: ${contactName} (relación: ${contactRelationship}).\n${instruction}`
+      : `Destinatario: ${contactName}.\n${instruction}`
+    : instruction;
+
+  const history: chat.ChatMessage[] = [{ role: "user", content: prompt }];
   const [messages] = await chat.buildRagMessages(history);
   const content = await llm.chatCompletionMessages(messages);
 
@@ -57,9 +68,9 @@ export async function listDrafts(): Promise<Draft[]> {
   }));
 }
 
-export async function updateDraftStatus(id: string, status: string, content: string | null): Promise<void> {
+export async function updateDraftStatus(id: string, status: string, content?: string | null): Promise<void> {
   const now = new Date().toISOString();
-  if (content !== null) {
+  if (content !== undefined && content !== null) {
     await dbRun("UPDATE drafts SET status = ?, content = ?, updated_at = ? WHERE id = ?", [status, content, now, id]);
   } else {
     await dbRun("UPDATE drafts SET status = ?, updated_at = ? WHERE id = ?", [status, now, id]);

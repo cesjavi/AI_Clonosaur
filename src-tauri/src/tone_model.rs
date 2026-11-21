@@ -21,7 +21,12 @@ pub async fn generate_tone(state: State<'_, DbState>) -> Result<usize, String> {
         let mut stmt = conn
             .prepare(
                 "SELECT c.id, c.title FROM conversations c
-                 WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_user = 1)",
+                 WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.is_user = 1 AND m.sensitivity IS NOT 'sensible')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM conversation_participants cp
+                   JOIN people p ON p.id = cp.person_id
+                   WHERE cp.conversation_id = c.id AND p.excluded = 1
+                 )",
             )
             .map_err(|e| e.to_string())?;
         let convs = stmt
@@ -39,7 +44,7 @@ pub async fn generate_tone(state: State<'_, DbState>) -> Result<usize, String> {
         for (conv_id, title) in convs {
             let mut mstmt = conn
                 .prepare(
-                    "SELECT text FROM messages WHERE conversation_id = ?1 AND is_user = 1 ORDER BY timestamp LIMIT 20",
+                    "SELECT text FROM messages WHERE conversation_id = ?1 AND is_user = 1 AND sensitivity IS NOT 'sensible' ORDER BY timestamp LIMIT 20",
                 )
                 .map_err(|e| e.to_string())?;
             let msgs = mstmt
@@ -97,7 +102,10 @@ Respondé solo texto plano, sin JSON ni comillas.\n\nMensajes:\n{sample}"
         );
 
         let tone = llm::chat_completion(state.inner(), &prompt).await?;
-        let tone = tone.trim().trim_matches('"').to_string();
+        let tone = llm::strip_think_blocks(&tone)
+            .trim()
+            .trim_matches('"')
+            .to_string();
         if tone.is_empty() {
             continue;
         }

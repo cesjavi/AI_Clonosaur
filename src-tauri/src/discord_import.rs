@@ -15,7 +15,8 @@ fn find_column_ci(headers: &csv::StringRecord, name: &str) -> Option<usize> {
 /// made to distinguish speakers within the CSV.
 #[tauri::command]
 pub fn import_discord_file(state: State<DbState>, path: String) -> Result<ImportSummary, String> {
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let raw_content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let content = raw_content.strip_prefix('\u{FEFF}').unwrap_or(&raw_content);
     let mut reader = csv::ReaderBuilder::new().from_reader(content.as_bytes());
     let headers = reader.headers().map_err(|e| e.to_string())?.clone();
 
@@ -26,16 +27,32 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
         .or_else(|| find_column_ci(&headers, "Content"))
         .ok_or("el CSV necesita una columna 'Contents' o 'Content'")?;
 
+    let mut parsed_rows: Vec<(String, String)> = Vec::new();
+    for result in reader.records() {
+        let row = result.map_err(|e| e.to_string())?;
+        let text = row.get(contents_idx).unwrap_or("").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let timestamp = import_common::normalize_timestamp(row.get(timestamp_idx).unwrap_or(""));
+        parsed_rows.push((text, timestamp));
+    }
+
+    if parsed_rows.is_empty() {
+        return Err("no se encontraron mensajes en el archivo CSV".to_string());
+    }
+
     let file_name = std::path::Path::new(&path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let source_id =
-        import_common::create_source(&conn, "discord", &file_name).map_err(|e| e.to_string())?;
+        import_common::create_source(&tx, "discord", &file_name).map_err(|e| e.to_string())?;
     let conversation_id = import_common::get_or_create_conversation(
-        &conn,
+        &tx,
         &source_id,
         "discord",
         &file_name,
@@ -46,21 +63,14 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
     let mut imported = 0usize;
     let mut duplicates = 0usize;
 
-    for result in reader.records() {
-        let row = result.map_err(|e| e.to_string())?;
-        let text = row.get(contents_idx).unwrap_or("").trim();
-        if text.is_empty() {
-            continue;
-        }
-        let timestamp = import_common::normalize_timestamp(row.get(timestamp_idx).unwrap_or(""));
-
+    for (text, timestamp) in parsed_rows {
         let inserted = import_common::insert_message_if_new(
-            &conn,
+            &tx,
             &conversation_id,
             &source_id,
             None,
             true,
-            text,
+            &text,
             &timestamp,
         )
         .map_err(|e| e.to_string())?;
@@ -71,6 +81,8 @@ pub fn import_discord_file(state: State<DbState>, path: String) -> Result<Import
             duplicates += 1;
         }
     }
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportSummary {
         source_id,

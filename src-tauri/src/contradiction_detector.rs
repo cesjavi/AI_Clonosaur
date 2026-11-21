@@ -24,7 +24,13 @@ pub async fn detect_contradictions(state: State<'_, DbState>) -> Result<usize, S
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT content, created_at FROM memories WHERE status IN ('confirmed','edited') ORDER BY created_at",
+                "SELECT mem.content, mem.created_at FROM memories mem
+                 WHERE mem.status IN ('confirmed','edited')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages ms
+                   WHERE ms.id = mem.source_message_id AND ms.sensitivity = 'sensible'
+                 )
+                 ORDER BY mem.created_at",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt

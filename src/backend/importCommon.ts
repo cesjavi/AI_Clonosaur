@@ -79,11 +79,13 @@ export async function getOrCreateConversation(
   return id;
 }
 
-/** Looks for a person by exact name; creates it if it doesn't exist. */
-export async function getOrCreatePerson(name: string): Promise<string> {
-  const existing = await dbQuery("SELECT id FROM people WHERE name = ?", [name]);
+/** Looks for a person by exact name; creates it if it doesn't exist. Also
+ * returns whether that person is already marked as `is_user` so re-imports and
+ * additional chats inherit the user's identity automatically. */
+export async function getOrCreatePersonWithFlag(name: string): Promise<{ id: string; isUser: boolean }> {
+  const existing = await dbQuery("SELECT id, is_user FROM people WHERE name = ?", [name]);
   if (existing.length > 0) {
-    return existing[0].id as string;
+    return { id: existing[0].id as string, isUser: Boolean(existing[0].is_user) };
   }
   const id = crypto.randomUUID();
   await dbRun("INSERT INTO people (id, name, is_user, created_at) VALUES (?, ?, 0, ?)", [
@@ -91,7 +93,12 @@ export async function getOrCreatePerson(name: string): Promise<string> {
     name,
     new Date().toISOString(),
   ]);
-  return id;
+  return { id, isUser: false };
+}
+
+/** Looks for a person by exact name; creates it if it doesn't exist. */
+export async function getOrCreatePerson(name: string): Promise<string> {
+  return (await getOrCreatePersonWithFlag(name)).id;
 }
 
 export async function ensureParticipant(conversationId: string, personId: string): Promise<void> {
@@ -102,32 +109,48 @@ export async function ensureParticipant(conversationId: string, personId: string
 }
 
 function duplicateKey(personId: string | null, timestamp: string, text: string): string {
-  return `${personId ?? ""} ${timestamp} ${text}`;
+  return `${personId ?? ""}\u0000${timestamp}\u0000${text}`;
 }
 
-export type DuplicateChecker = (personId: string | null, timestamp: string, text: string) => boolean;
+function timestamplessDuplicateKey(personId: string | null, text: string): string {
+  return `${personId ?? ""}\u0000${text}`;
+}
+
+export type DuplicateChecker = (
+  personId: string | null,
+  timestamp: string,
+  text: string,
+  matchTimestamp?: boolean,
+) => boolean;
 
 /** Loads every (person_id, timestamp, text) key already present in a
  * conversation once, so `insertMessageIfNew` can check duplicates against an
- * in-memory Set instead of running a `SELECT` per message. On the web build
- * each `dbQuery`/`dbRun` is a full round-trip to the serialized SQLite
- * worker; for a large import (tens of thousands of rows) that turns 2×N
- * sequential round-trips into one query plus N inserts. Matches within the
- * same import (a file containing the same message twice) are still caught,
- * since a key is added to the set as soon as it's seen — mirroring the old
- * per-row DB check, which would have found the just-inserted row too. */
+ * in-memory Set instead of running a `SELECT` per message. */
 export async function createDuplicateChecker(conversationId: string): Promise<DuplicateChecker> {
   const rows = await dbQuery("SELECT person_id, timestamp, text FROM messages WHERE conversation_id = ?", [
     conversationId,
   ]);
   const seen = new Set<string>();
+  const seenTimestampless = new Set<string>();
   for (const row of rows) {
-    seen.add(duplicateKey(row.person_id as string | null, row.timestamp as string, row.text as string));
+    const pid = row.person_id as string | null;
+    const ts = row.timestamp as string;
+    const text = row.text as string;
+    seen.add(duplicateKey(pid, ts, text));
+    seenTimestampless.add(timestamplessDuplicateKey(pid, text));
   }
-  return (personId, timestamp, text) => {
-    const key = duplicateKey(personId, timestamp, text);
-    if (seen.has(key)) return true;
-    seen.add(key);
+  return (personId, timestamp, text, matchTimestamp = true) => {
+    const fullKey = duplicateKey(personId, timestamp, text);
+    const shortKey = timestamplessDuplicateKey(personId, text);
+    if (matchTimestamp) {
+      if (seen.has(fullKey)) return true;
+      seen.add(fullKey);
+      seenTimestampless.add(shortKey);
+      return false;
+    }
+    if (seenTimestampless.has(shortKey)) return true;
+    seen.add(fullKey);
+    seenTimestampless.add(shortKey);
     return false;
   };
 }
@@ -200,7 +223,7 @@ export function parseCsv(content: string): string[][] {
   let field = "";
   let inQuotes = false;
   let i = 0;
-  const text = content.replace(/\r\n/g, "\n");
+  const text = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
   const endField = () => {
     row.push(field);
@@ -229,7 +252,7 @@ export function parseCsv(content: string): string[][] {
       i += 1;
       continue;
     }
-    if (c === '"') {
+    if (c === '"' && field === "") {
       inQuotes = true;
       i += 1;
       continue;
@@ -265,8 +288,9 @@ export async function insertMessageIfNew(
   text: string,
   timestamp: string,
   isDuplicate: DuplicateChecker,
+  matchTimestamp = true,
 ): Promise<boolean> {
-  if (isDuplicate(personId, timestamp, text)) {
+  if (isDuplicate(personId, timestamp, text, matchTimestamp)) {
     return false;
   }
 

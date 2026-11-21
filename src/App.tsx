@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke, isTauri } from "./backend/invoke";
 import Interview from "./Interview";
 import Profile from "./Profile";
@@ -53,11 +53,17 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [vaultLocked, setVaultLocked] = useState<boolean | null>(null);
 
+  const handleSplashFinish = useCallback(() => setShowSplash(false), []);
+
   function loadSettings() {
-    invoke<Record<string, string>>("get_settings").then((s) => {
-      setOnboardingCompleted(s.onboarding_completed === "true");
-      applyTheme(s.theme ?? "system");
-    });
+    invoke<Record<string, string>>("get_settings")
+      .then((s) => {
+        setOnboardingCompleted(s.onboarding_completed === "true");
+        applyTheme(s.theme ?? "system");
+      })
+      .catch(() => {
+        setOnboardingCompleted(false);
+      });
   }
 
   useEffect(() => {
@@ -77,7 +83,7 @@ function App() {
   }, [vaultLocked]);
 
   if (showSplash) {
-    return <SplashScreen onFinish={() => setShowSplash(false)} />;
+    return <SplashScreen onFinish={handleSplashFinish} />;
   }
 
   if (vaultLocked === null) {

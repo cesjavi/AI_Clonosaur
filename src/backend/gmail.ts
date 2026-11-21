@@ -29,10 +29,10 @@ export function splitMboxMessages(content: string): string[] {
 }
 
 function splitHeadersBody(raw: string): [string, string] {
-  let pos = raw.indexOf("\r\n\r\n");
-  if (pos !== -1) return [raw.slice(0, pos), raw.slice(pos + 4)];
-  pos = raw.indexOf("\n\n");
-  if (pos !== -1) return [raw.slice(0, pos), raw.slice(pos + 2)];
+  const crlf = raw.indexOf("\r\n\r\n");
+  const lf = raw.indexOf("\n\n");
+  if (crlf !== -1 && (lf === -1 || crlf <= lf)) return [raw.slice(0, crlf), raw.slice(crlf + 4)];
+  if (lf !== -1) return [raw.slice(0, lf), raw.slice(lf + 2)];
   return [raw, ""];
 }
 
@@ -140,6 +140,7 @@ function decodeEncodedWords(input: string): string {
 }
 
 function decodeQuotedPrintable(body: string): Uint8Array {
+  const encoder = new TextEncoder();
   const out: number[] = [];
   let i = 0;
   while (i < body.length) {
@@ -164,13 +165,24 @@ function decodeQuotedPrintable(body: string): Uint8Array {
       i += 1;
       continue;
     }
-    out.push(c.charCodeAt(0));
-    i += 1;
+    const code = c.charCodeAt(0);
+    if (code < 0x80) {
+      out.push(code);
+      i += 1;
+    } else {
+      // Preserve literal multi-byte UTF-8 characters (including surrogate pairs)
+      // instead of truncating UTF-16 code units modulo 256.
+      const cp = body.codePointAt(i)!;
+      const charLen = cp > 0xffff ? 2 : 1;
+      const encoded = encoder.encode(body.slice(i, i + charLen));
+      for (const byte of encoded) out.push(byte);
+      i += charLen;
+    }
   }
   return new Uint8Array(out);
 }
 
-function decodeBody(body: string, transferEncoding: string): string {
+export function decodeBody(body: string, transferEncoding: string): string {
   const enc = transferEncoding.toLowerCase().trim();
   if (enc === "quoted-printable") {
     try {
@@ -229,7 +241,7 @@ function getBoundary(contentType: string): string | undefined {
 /** Extracts the plain text from a MIME message, preferring text/plain over
  * text/html, recursing down through multipart/* (e.g. multipart/mixed
  * containing a multipart/alternative inside). */
-function extractPlainText(contentType: string, transferEncoding: string, body: string): string | undefined {
+export function extractPlainText(contentType: string, transferEncoding: string, body: string): string | undefined {
   const ctLower = contentType.toLowerCase();
 
   if (ctLower.startsWith("multipart/")) {
@@ -240,9 +252,12 @@ function extractPlainText(contentType: string, transferEncoding: string, body: s
     let plain: string | undefined;
     let html: string | undefined;
 
-    for (const rawPart of body.split(delimiter)) {
+    // Skip element 0: the MIME preamble before the first `--boundary`
+    // (e.g. "This is a multi-part message in MIME format.").
+    for (const rawPart of body.split(delimiter).slice(1)) {
+      if (rawPart.startsWith("--")) break;
       const part = rawPart.replace(/^[\r\n]+/, "");
-      if (!part.trim() || part.trimStart().startsWith("--")) continue;
+      if (!part.trim()) continue;
 
       const [partHeadersRaw, partBody] = splitHeadersBody(part);
       const partHeaders = parseHeaders(partHeadersRaw);
@@ -278,7 +293,7 @@ export function parseFromHeader(raw: string): string {
   const decoded = decodeEncodedWords(raw);
   const lt = decoded.indexOf("<");
   if (lt !== -1) {
-    const gt = decoded.indexOf(">");
+    const gt = decoded.indexOf(">", lt + 1);
     if (gt !== -1) {
       const name = decoded.slice(0, lt).trim().replace(/^"+|"+$/g, "");
       const email = decoded.slice(lt + 1, gt).trim();
@@ -303,23 +318,7 @@ export async function importGmailFile(fileName: string, bytes: Uint8Array): Prom
     throw new Error("no se encontraron mensajes en el archivo .mbox");
   }
 
-  const sourceId = await importCommon.createSource("gmail", fileName);
-  const conversationId = await importCommon.getOrCreateConversation(
-    sourceId,
-    "gmail",
-    fileName,
-    importCommon.fingerprintFileName(fileName),
-  );
-  const isDuplicate = await importCommon.createDuplicateChecker(conversationId);
-
-  let imported = 0;
-  let duplicates = 0;
-  const participants: string[] = [];
-  // Caches resolved person ids by display name so a mailbox with many
-  // messages from the same few senders doesn't issue a person-lookup round
-  // trip per message — only once per distinct sender.
-  const personIdCache = new Map<string, string>();
-
+  const parsedEmails: { text: string; timestamp: string; isUser: boolean; sender: string | null }[] = [];
   for (const block of blocks) {
     const newlineIdx = block.indexOf("\n");
     if (newlineIdx === -1) continue;
@@ -343,18 +342,39 @@ export async function importGmailFile(fileName: string, bytes: Uint8Array): Prom
       .split(",")
       .some((l) => l.trim() === "sent");
 
+    const sender = isUser ? null : parseFromHeader(getHeader(headers, "from") ?? "Desconocido");
+    parsedEmails.push({ text: trimmedText, timestamp, isUser, sender });
+  }
+
+  if (parsedEmails.length === 0) {
+    throw new Error("no se encontraron mensajes con contenido legible en el archivo .mbox");
+  }
+
+  const sourceId = await importCommon.createSource("gmail", fileName);
+  const conversationId = await importCommon.getOrCreateConversation(
+    sourceId,
+    "gmail",
+    fileName,
+    importCommon.fingerprintFileName(fileName),
+  );
+  const isDuplicate = await importCommon.createDuplicateChecker(conversationId);
+
+  let imported = 0;
+  let duplicates = 0;
+  const participants: string[] = [];
+  const personIdCache = new Map<string, string>();
+
+  for (const email of parsedEmails) {
     let personId: string | null = null;
-    if (!isUser) {
-      const fromRaw = getHeader(headers, "from") ?? "Desconocido";
-      const display = parseFromHeader(fromRaw);
-      if (!participants.includes(display)) participants.push(display);
-      const cached = personIdCache.get(display);
+    if (email.sender !== null) {
+      if (!participants.includes(email.sender)) participants.push(email.sender);
+      const cached = personIdCache.get(email.sender);
       if (cached) {
         personId = cached;
       } else {
-        personId = await importCommon.getOrCreatePerson(display);
+        personId = await importCommon.getOrCreatePerson(email.sender);
         await importCommon.ensureParticipant(conversationId, personId);
-        personIdCache.set(display, personId);
+        personIdCache.set(email.sender, personId);
       }
     }
 
@@ -362,9 +382,9 @@ export async function importGmailFile(fileName: string, bytes: Uint8Array): Prom
       conversationId,
       sourceId,
       personId,
-      isUser,
-      trimmedText,
-      timestamp,
+      email.isUser,
+      email.text,
+      email.timestamp,
       isDuplicate,
     );
 

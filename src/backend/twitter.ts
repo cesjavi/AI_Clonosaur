@@ -11,19 +11,26 @@ interface TweetData {
  * is trimmed to keep only the array, without needing a JS parser. */
 export function parseTwitterArchive(content: string): TweetData[] {
   const jsonStart = content.indexOf("[");
-  if (jsonStart === -1) throw new Error("no se encontró el array de tweets en el archivo");
+  if (jsonStart === -1) {
+    throw new Error("no se encontró el array de tweets en el archivo");
+  }
+  const rawJson = content.slice(jsonStart).trimEnd().replace(/;+$/, "");
   let wrappers: unknown[];
   try {
-    wrappers = JSON.parse(content.slice(jsonStart));
+    wrappers = JSON.parse(rawJson);
   } catch (e) {
     throw new Error(`JSON de tweets inválido: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
   }
-  // Entries with an unexpected shape (missing/malformed "tweet" key) are
-  // skipped instead of crashing the whole import — a single corrupted or
-  // unrecognized entry shouldn't lose every tweet that parsed correctly.
+  if (!Array.isArray(wrappers)) {
+    throw new Error("no se encontró el array de tweets en el archivo");
+  }
   return wrappers
-    .map((w) => (w as { tweet?: TweetData })?.tweet)
-    .filter((t): t is TweetData => typeof t?.full_text === "string");
+    .map((w) => (w as { tweet?: Partial<TweetData> })?.tweet)
+    .filter((t): t is Partial<TweetData> & { full_text: string } => typeof t?.full_text === "string")
+    .map((t) => ({
+      full_text: t.full_text,
+      created_at: typeof t.created_at === "string" ? t.created_at : "",
+    }));
 }
 
 const MONTHS: Record<string, number> = {
@@ -59,6 +66,10 @@ export async function importTwitterFile(
   bytes: Uint8Array,
   username: string,
 ): Promise<ImportSummary> {
+  const cleanUsername = username.trim();
+  if (!cleanUsername) {
+    throw new Error("tenés que indicar un usuario de Twitter/X");
+  }
   const content = new TextDecoder("utf-8").decode(bytes);
   const tweets = parseTwitterArchive(content);
 
@@ -67,18 +78,14 @@ export async function importTwitterFile(
   }
 
   const sourceId = await importCommon.createSource("twitter", fileName);
-  // Fingerprinted by username, not file name: an archive only ever contains
-  // one account's tweets, so the username is a stable identity for the
-  // conversation across re-downloads (which commonly get renamed with a
-  // "(1)" suffix or a different export timestamp), unlike the file name.
   const conversationId = await importCommon.getOrCreateConversation(
     sourceId,
     "twitter",
     fileName,
-    username.toLowerCase(),
+    cleanUsername.toLowerCase(),
   );
-  const personId = await importCommon.getOrCreatePerson(username);
-  await importCommon.ensureParticipant(conversationId, personId);
+  const person = await importCommon.getOrCreatePersonWithFlag(cleanUsername);
+  await importCommon.ensureParticipant(conversationId, person.id);
   const isDuplicate = await importCommon.createDuplicateChecker(conversationId);
 
   let imported = 0;
@@ -92,8 +99,8 @@ export async function importTwitterFile(
     const inserted = await importCommon.insertMessageIfNew(
       conversationId,
       sourceId,
-      personId,
-      false,
+      person.id,
+      person.isUser,
       text,
       timestamp,
       isDuplicate,
@@ -103,5 +110,5 @@ export async function importTwitterFile(
     else duplicates += 1;
   }
 
-  return { source_id: sourceId, imported, duplicates, participants: [username] };
+  return { source_id: sourceId, imported, duplicates, participants: [cleanUsername] };
 }

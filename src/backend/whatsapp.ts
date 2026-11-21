@@ -52,7 +52,7 @@ export function parseWhatsappTimestamp(dateStr: string, timeStr: string): string
     }
   }
 
-  let timeMain = timeStr.trim();
+  let timeMain = timeStr.trim().replace(/[\u00A0\u202F\u2007]/g, " ");
   let meridiem: boolean | null = null;
   if (/am$/i.test(timeMain) || /a\.\s*m\.$/i.test(timeMain)) {
     timeMain = timeMain.replace(/am$/i, "").replace(/a\.\s*m\.$/i, "").trim();
@@ -67,15 +67,27 @@ export function parseWhatsappTimestamp(dateStr: string, timeStr: string): string
   let hour = parseInt(timeBits[0], 10);
   const minute = parseInt(timeBits[1], 10);
   const second = timeBits.length > 2 ? parseInt(timeBits[2], 10) : 0;
-  if ([hour, minute].some(Number.isNaN)) return null;
+  if ([hour, minute, second].some(Number.isNaN)) return null;
 
   if (meridiem !== null) {
+    if (hour < 1 || hour > 12) return null;
     if (meridiem && hour !== 12) hour += 12;
     if (!meridiem && hour === 12) hour = 0;
   }
 
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return null;
+  }
+
   const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-  if (Number.isNaN(date.getTime())) return null;
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
   return date.toISOString();
 }
 
@@ -90,9 +102,12 @@ function parseHeaderDatetime(header: string): string | null {
  * discarded; multi-line messages are appended to the last real message. */
 export function parseWhatsappText(content: string): ParsedMessage[] {
   const messages: ParsedMessage[] = [];
+  let inSystemMessage = false;
 
   for (const rawLine of content.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
+    // Strip trailing CR and leading BOM / Unicode directional marks (iOS exports
+    // routinely prefix lines with U+200E LRM).
+    const line = rawLine.replace(/\r$/, "").replace(/^[\uFEFF\u200E\u200F\u202A-\u202E]+/, "");
     if (line.trim() === "") continue;
 
     const headerAndRest = splitIosHeader(line) ?? splitAndroidHeader(line);
@@ -108,14 +123,19 @@ export function parseWhatsappText(content: string): ParsedMessage[] {
             text: rest.slice(sepIdx + 2).trim(),
             timestamp,
           });
+          inSystemMessage = false;
+        } else {
+          inSystemMessage = true;
         }
         continue;
       }
     }
 
-    const last = messages[messages.length - 1];
-    if (last) {
-      last.text += "\n" + line.trim();
+    if (!inSystemMessage) {
+      const last = messages[messages.length - 1];
+      if (last) {
+        last.text += "\n" + line.trim();
+      }
     }
   }
 
@@ -126,6 +146,8 @@ function readWhatsappContent(fileName: string, bytes: Uint8Array): string {
   if (fileName.toLowerCase().endsWith(".zip")) {
     const entries = unzipSync(bytes);
     for (const [name, data] of Object.entries(entries)) {
+      const baseName = name.split("/").pop() ?? name;
+      if (name.startsWith("__MACOSX/") || baseName.startsWith("._")) continue;
       if (name.toLowerCase().endsWith(".txt")) {
         return new TextDecoder("utf-8").decode(data);
       }
@@ -161,24 +183,24 @@ export async function importWhatsappFile(fileName: string, bytes: Uint8Array): P
   // message chat between 2 people otherwise issues ~10k serialized
   // person-lookup round trips through the worker queue for only 2 distinct
   // names.
-  const personIds = new Map<string, string>();
+  const personMap = new Map<string, { id: string; isUser: boolean }>();
   for (const name of participants) {
-    const personId = await importCommon.getOrCreatePerson(name);
-    await importCommon.ensureParticipant(conversationId, personId);
-    personIds.set(name, personId);
+    const person = await importCommon.getOrCreatePersonWithFlag(name);
+    await importCommon.ensureParticipant(conversationId, person.id);
+    personMap.set(name, person);
   }
 
   let imported = 0;
   let duplicates = 0;
 
   for (const msg of parsed) {
-    const personId = personIds.get(msg.author)!;
+    const person = personMap.get(msg.author)!;
 
     const inserted = await importCommon.insertMessageIfNew(
       conversationId,
       sourceId,
-      personId,
-      false,
+      person.id,
+      person.isUser,
       msg.text,
       msg.timestamp,
       isDuplicate,

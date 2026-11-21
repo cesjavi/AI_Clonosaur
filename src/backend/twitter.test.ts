@@ -25,6 +25,11 @@ describe("parseTwitterArchive", () => {
   it("throws a friendly error for invalid JSON", () => {
     expect(() => parseTwitterArchive("window.YTD.tweet.part0 = [{broken")).toThrow(/JSON de tweets inválido/);
   });
+
+  it("accepts a trailing semicolon and handles tweets missing created_at", () => {
+    const content = `window.YTD.tweet.part0 = [{"tweet":{"full_text":"hola"}}];\n`;
+    expect(parseTwitterArchive(content)).toEqual([{ created_at: "", full_text: "hola" }]);
+  });
 });
 
 describe("parseTwitterTimestamp", () => {

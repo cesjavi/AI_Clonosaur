@@ -33,6 +33,7 @@ export default function Interview() {
   const [activeModule, setActiveModule] = useState(MODULES[0].module);
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<InterviewAnswer[]>("get_interview_answers")
@@ -43,6 +44,7 @@ export default function Interview() {
         }
         setAnswers(map);
       })
+      .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -60,6 +62,7 @@ export default function Interview() {
   async function saveAnswer(module: string, question: Question, value: string) {
     const key = answerKey(module, question.id);
     setSavingKey(key);
+    setError(null);
     try {
       await invoke("save_interview_answer", {
         module,
@@ -67,6 +70,8 @@ export default function Interview() {
         questionText: question.text,
         answer: value,
       });
+    } catch (e) {
+      setError(`No se pudo guardar la respuesta: ${String(e)}`);
     } finally {
       setSavingKey((current) => (current === key ? null : current));
     }
@@ -105,6 +110,7 @@ export default function Interview() {
 
       <section className="interview-content">
         <h2>{current.label}</h2>
+        {error && <p className="chat-error">{error}</p>}
         {current.questions.map((q) => {
           const key = answerKey(current.module, q.id);
           return (

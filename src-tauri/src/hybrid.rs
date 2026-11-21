@@ -32,13 +32,16 @@ pub fn save_provider_credentials(
     model: String,
 ) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let trimmed_base_url = base_url.trim().trim_end_matches('/').to_string();
     conn.execute(
         "INSERT INTO provider_credentials (provider, base_url, api_key, model, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(provider) DO UPDATE SET
-            base_url = excluded.base_url, api_key = excluded.api_key,
-            model = excluded.model, updated_at = excluded.updated_at",
-        params![provider, base_url, api_key, model, Utc::now().to_rfc3339()],
+            base_url = excluded.base_url,
+            api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE provider_credentials.api_key END,
+            model = excluded.model,
+            updated_at = excluded.updated_at",
+        params![provider, trimmed_base_url, api_key, model, Utc::now().to_rfc3339()],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -94,6 +97,56 @@ fn render_messages(messages: &[ChatMessage]) -> String {
         .join("\n\n")
 }
 
+/// Case-insensitive, word-boundary contact anonymizer sorted longest-first so
+/// `"Ana María"` is replaced as a single `[contacto]` before `"Ana"`, and
+/// substrings inside regular words (like `"mañana"`) are left intact.
+fn anonymize_text(text: &str, names: &[String]) -> String {
+    let mut sorted: Vec<Vec<char>> = names
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+        .map(|n| n.to_lowercase().chars().collect::<Vec<_>>())
+        .collect();
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    sorted.dedup();
+    if sorted.is_empty() {
+        return text.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let lower_chars: Vec<char> = chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let prev_is_word = i > 0 && chars[i - 1].is_alphanumeric();
+        let mut matched_len = None;
+        if !prev_is_word {
+            for name in &sorted {
+                let n = name.len();
+                if i + n <= lower_chars.len() && lower_chars[i..i + n] == name[..] {
+                    let next_is_word = i + n < chars.len() && chars[i + n].is_alphanumeric();
+                    if !next_is_word {
+                        matched_len = Some(n);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(n) = matched_len {
+            out.push_str("[contacto]");
+            i += n;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Builds the EXACT message that would be sent, without making any network
 /// call. Reuses `build_rag_messages` (same context logic as the local chat)
 /// and offers to anonymize contact names before showing the preview.
@@ -120,11 +173,7 @@ pub async fn build_hybrid_preview(
             rows
         };
         for m in messages.iter_mut() {
-            for name in &names {
-                if !name.trim().is_empty() {
-                    m.content = m.content.replace(name.as_str(), "[contacto]");
-                }
-            }
+            m.content = anonymize_text(&m.content, &names);
         }
     }
 
@@ -191,6 +240,7 @@ pub async fn send_to_external_provider(
         .map_err(|_| format!("no hay credenciales guardadas para '{provider}'"))?
     };
 
+    let base_url = base_url.trim_end_matches('/');
     let client = reqwest::Client::new();
     let body = serde_json::json!({ "model": model, "messages": messages });
     let res = client
@@ -218,6 +268,11 @@ pub async fn send_to_external_provider(
         .map(|c| c.message.content)
         .unwrap_or_default();
 
+    // Always log the exact messages actually sent over the wire rather than
+    // trusting the caller-supplied `rendered_text`.
+    let _ = rendered_text;
+    let actual_rendered = render_messages(&messages);
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO external_send_log (id, provider, model, anonymized, content, created_at)
@@ -227,7 +282,7 @@ pub async fn send_to_external_provider(
             provider,
             model,
             anonymized,
-            rendered_text,
+            actual_rendered,
             Utc::now().to_rfc3339()
         ],
     )
@@ -273,4 +328,16 @@ pub fn list_external_send_log(state: State<DbState>) -> Result<Vec<SendLogEntry>
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymize_text_matches_longest_first_and_respects_word_boundaries() {
+        let names = vec!["Ana".to_string(), "Ana María".to_string()];
+        let out = anonymize_text("Mañana veo a ana maría y a Ana.", &names);
+        assert_eq!(out, "Mañana veo a [contacto] y a [contacto].");
+    }
 }

@@ -47,6 +47,7 @@ struct OpenAiResponse {
 /// model's response (not parsed yet).
 pub async fn chat_completion(db: &DbState, prompt: &str) -> Result<String, String> {
     let base_url = settings::get_setting_from_db(db, "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
+    let base_url = base_url.trim_end_matches('/');
     let model = settings::get_setting_from_db(db, "chat_model", DEFAULT_CHAT_MODEL);
     let style = settings::get_setting_from_db(db, "local_api_style", DEFAULT_LOCAL_API_STYLE);
 
@@ -126,16 +127,68 @@ pub fn value_to_text(v: &serde_json::Value) -> String {
     }
 }
 
-/// Models often wrap the requested JSON in prose or ```json``` code blocks;
-/// this trims to the first '[' and the last ']' before parsing instead of assuming
-/// the response is pure JSON and failing the whole generator because of it.
+/// Removes `<think>...</think>` blocks emitted by reasoning models (as well as
+/// any truncated unclosed trailing `<think>...` block).
+pub fn strip_think_blocks(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + "<think>".len()..];
+        match after_open.find("</think>") {
+            Some(end) => rest = &after_open[end + "</think>".len()..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Models often wrap the requested JSON in prose, `<think>` blocks, or
+/// ```json``` code blocks — and may cite `[0]`/`[1]` in preamble prose before
+/// the actual JSON array. Strips `<think>` blocks first, then tries candidate
+/// `[` starts against the last `]` so earlier bracketed citations don't break
+/// parsing.
 pub fn parse_json_array<T: DeserializeOwned>(raw: &str) -> Result<Vec<T>, String> {
-    let start = raw.find('[');
-    let end = raw.rfind(']');
-    match (start, end) {
-        (Some(s), Some(e)) if e >= s => serde_json::from_str(&raw[s..=e]).map_err(|err| {
-            format!("no se pudo interpretar la respuesta del modelo como JSON: {err}")
-        }),
-        _ => Err("el modelo no devolvió un array JSON reconocible".to_string()),
+    let cleaned = strip_think_blocks(raw);
+    let Some(end) = cleaned.rfind(']') else {
+        return Err("el modelo no devolvió un array JSON reconocible".to_string());
+    };
+
+    let mut last_err = None;
+    for (idx, ch) in cleaned[..=end].char_indices() {
+        if ch != '[' {
+            continue;
+        }
+        match serde_json::from_str::<Vec<T>>(&cleaned[idx..=end]) {
+            Ok(parsed) => return Ok(parsed),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    match last_err {
+        Some(err) => Err(format!(
+            "no se pudo interpretar la respuesta del modelo como JSON: {err}"
+        )),
+        None => Err("el modelo no devolvió un array JSON reconocible".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_think_blocks_removes_closed_and_unclosed_blocks() {
+        assert_eq!(strip_think_blocks("<think>abc</think>Hola"), "Hola");
+        assert_eq!(strip_think_blocks("A<think>x</think>B<think>y"), "AB");
+    }
+
+    #[test]
+    fn parse_json_array_handles_think_blocks_and_bracket_citations() {
+        let raw = r#"<think>Revisando [0] y [1]</think>Según [0]: [{"a": 1}]"#;
+        let parsed: Vec<serde_json::Value> = parse_json_array(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["a"], 1);
     }
 }

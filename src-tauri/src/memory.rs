@@ -29,6 +29,7 @@ struct OpenAiEmbeddingResponse {
 /// Lemonade Server) — both run on the user's machine.
 pub(crate) async fn ollama_embed(db: &DbState, text: &str) -> Result<Vec<f32>, String> {
     let base_url = settings::get_setting_from_db(db, "ollama_base_url", DEFAULT_OLLAMA_BASE_URL);
+    let base_url = base_url.trim_end_matches('/');
     let model = settings::get_setting_from_db(db, "embedding_model", DEFAULT_EMBEDDING_MODEL);
     let style = settings::get_setting_from_db(db, "local_api_style", DEFAULT_LOCAL_API_STYLE);
 
@@ -83,6 +84,9 @@ pub(crate) async fn ollama_embed(db: &DbState, text: &str) -> Result<Vec<f32>, S
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -92,14 +96,19 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-/// Own messages that don't have an embedding yet (candidates to index).
-fn messages_without_embedding(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+/// Messages that don't have an embedding for the active `embedding_model` yet.
+fn messages_without_embedding(
+    conn: &Connection,
+    embedding_model: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.text FROM messages m
          LEFT JOIN embeddings e ON e.message_id = m.id
-         WHERE e.message_id IS NULL",
+         WHERE e.message_id IS NULL OR e.model != ?1",
     )?;
-    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let rows = stmt.query_map(params![embedding_model], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
     rows.collect()
 }
 
@@ -111,12 +120,18 @@ pub struct EmbeddingCoverage {
 
 #[tauri::command]
 pub fn get_embedding_coverage(state: State<DbState>) -> Result<EmbeddingCoverage, String> {
+    let embedding_model =
+        settings::get_setting_from_db(state.inner(), "embedding_model", DEFAULT_EMBEDDING_MODEL);
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let total_messages: i64 = conn
         .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
     let with_embedding: i64 = conn
-        .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE model = ?1",
+            params![embedding_model],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
     Ok(EmbeddingCoverage {
         total_messages,
@@ -124,18 +139,17 @@ pub fn get_embedding_coverage(state: State<DbState>) -> Result<EmbeddingCoverage
     })
 }
 
-/// Generates embeddings for all messages that don't have one yet.
-/// Runs sequentially against local Ollama: sufficient for personal data
-/// volumes, and simpler than parallelizing against a single local model.
+/// Generates embeddings for all messages that don't have one yet (or were
+/// indexed with a different `embedding_model`). Runs sequentially against
+/// local Ollama.
 #[tauri::command]
 pub async fn generate_embeddings(state: State<'_, DbState>) -> Result<usize, String> {
-    let pending = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        messages_without_embedding(&conn).map_err(|e| e.to_string())?
-    };
-
     let embedding_model =
         settings::get_setting_from_db(state.inner(), "embedding_model", DEFAULT_EMBEDDING_MODEL);
+    let pending = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        messages_without_embedding(&conn, &embedding_model).map_err(|e| e.to_string())?
+    };
 
     let mut generated = 0usize;
     for (message_id, text) in pending {
@@ -147,6 +161,18 @@ pub async fn generate_embeddings(state: State<'_, DbState>) -> Result<usize, Str
         let now = Utc::now().to_rfc3339();
 
         let conn = state.0.lock().map_err(|e| e.to_string())?;
+        // Skip gracefully if the message was deleted concurrently while the
+        // HTTP embedding call was in flight (instead of aborting the batch on FK).
+        let still_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !still_exists {
+            continue;
+        }
         conn.execute(
             "INSERT INTO embeddings (message_id, model, vector, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(message_id) DO UPDATE SET model = excluded.model, vector = excluded.vector, created_at = excluded.created_at",
@@ -178,6 +204,7 @@ pub struct MemorySearchResult {
 pub(crate) fn find_similar_messages(
     conn: &Connection,
     query_vector: &[f32],
+    embedding_model: &str,
     limit: usize,
     exclude_sensitive: bool,
 ) -> Result<Vec<MemorySearchResult>, String> {
@@ -187,19 +214,21 @@ pub(crate) fn find_similar_messages(
          JOIN messages m ON m.id = e.message_id
          LEFT JOIN people p ON p.id = m.person_id
          JOIN sources s ON s.id = m.source_id
-         WHERE m.sensitivity IS NOT 'sensible'
+         WHERE e.model = ?1
+         AND m.sensitivity IS NOT 'sensible'
          AND (p.excluded IS NULL OR p.excluded = 0)"
     } else {
         "SELECT e.message_id, e.vector, m.text, m.timestamp, m.is_user, p.name, s.kind
          FROM embeddings e
          JOIN messages m ON m.id = e.message_id
          LEFT JOIN people p ON p.id = m.person_id
-         JOIN sources s ON s.id = m.source_id"
+         JOIN sources s ON s.id = m.source_id
+         WHERE e.model = ?1"
     };
 
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params![embedding_model], |row| {
             let vector_json: String = row.get(1)?;
             Ok((
                 row.get::<_, String>(0)?,
@@ -218,6 +247,9 @@ pub(crate) fn find_similar_messages(
         let (message_id, vector_json, text, timestamp, is_user, author, source_kind) =
             row.map_err(|e| e.to_string())?;
         let vector: Vec<f32> = serde_json::from_str(&vector_json).map_err(|e| e.to_string())?;
+        if vector.len() != query_vector.len() {
+            continue;
+        }
         let score = cosine_similarity(query_vector, &vector);
         scored.push(MemorySearchResult {
             message_id,
@@ -244,7 +276,15 @@ pub async fn search_memory(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<MemorySearchResult>, String> {
+    let embedding_model =
+        settings::get_setting_from_db(state.inner(), "embedding_model", DEFAULT_EMBEDDING_MODEL);
     let query_vector = ollama_embed(state.inner(), &query).await?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    find_similar_messages(&conn, &query_vector, limit.unwrap_or(5), false)
+    find_similar_messages(
+        &conn,
+        &query_vector,
+        &embedding_model,
+        limit.unwrap_or(5),
+        false,
+    )
 }

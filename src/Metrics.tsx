@@ -27,11 +27,15 @@ function pct(n: number, total: number): string {
 
 export default function Metrics() {
   const [m, setM] = useState<Metrics | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<Metrics>("get_metrics").then(setM);
+    invoke<Metrics>("get_metrics")
+      .then(setM)
+      .catch((e) => setError(String(e)));
   }, []);
 
+  if (error) return <p className="chat-error">{error}</p>;
   if (!m) return <p className="metrics-loading">Cargando métricas…</p>;
 
   const memoriesTotal = m.memories_candidate + m.memories_confirmed + m.memories_edited + m.memories_rejected;

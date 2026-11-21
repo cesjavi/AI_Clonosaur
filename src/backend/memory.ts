@@ -32,6 +32,7 @@ export async function ollamaEmbed(text: string): Promise<number[]> {
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -50,24 +51,24 @@ export interface EmbeddingCoverage {
 }
 
 export async function getEmbeddingCoverage(): Promise<EmbeddingCoverage> {
+  const embeddingModel = await settings.getSettingFromDb("embedding_model", settings.DEFAULT_EMBEDDING_MODEL);
   const [[totalRow], [withRow]] = await Promise.all([
     dbQuery("SELECT COUNT(*) as n FROM messages"),
-    dbQuery("SELECT COUNT(*) as n FROM embeddings"),
+    dbQuery("SELECT COUNT(*) as n FROM embeddings WHERE model = ?", [embeddingModel]),
   ]);
   return { total_messages: totalRow.n as number, with_embedding: withRow.n as number };
 }
 
-/** Generates embeddings for all messages that don't have one yet. Runs
- * sequentially against the local engine: sufficient for personal data
- * volumes, and simpler than parallelizing against a single local model. */
+/** Generates embeddings for all messages that don't have one yet (or were
+ * indexed with a different `embedding_model`). */
 export async function generateEmbeddings(): Promise<number> {
+  const embeddingModel = await settings.getSettingFromDb("embedding_model", settings.DEFAULT_EMBEDDING_MODEL);
   const pending = await dbQuery(
     `SELECT m.id, m.text FROM messages m
      LEFT JOIN embeddings e ON e.message_id = m.id
-     WHERE e.message_id IS NULL`,
+     WHERE e.message_id IS NULL OR e.model != ?`,
+    [embeddingModel],
   );
-
-  const embeddingModel = await settings.getSettingFromDb("embedding_model", settings.DEFAULT_EMBEDDING_MODEL);
 
   let generated = 0;
   for (const row of pending) {
@@ -78,6 +79,9 @@ export async function generateEmbeddings(): Promise<number> {
     const vector = await ollamaEmbed(text);
     const vectorJson = JSON.stringify(vector);
     const now = new Date().toISOString();
+
+    const exists = await dbQuery("SELECT 1 FROM messages WHERE id = ?", [messageId]);
+    if (exists.length === 0) continue;
 
     await dbRun(
       `INSERT INTO embeddings (message_id, model, vector, created_at) VALUES (?, ?, ?, ?)
@@ -109,25 +113,30 @@ export async function findSimilarMessages(
   limit: number,
   excludeSensitive: boolean,
 ): Promise<MemorySearchResult[]> {
+  const embeddingModel = await settings.getSettingFromDb("embedding_model", settings.DEFAULT_EMBEDDING_MODEL);
   const sql = excludeSensitive
     ? `SELECT e.message_id, e.vector, m.text, m.timestamp, m.is_user, p.name as author, s.kind as source_kind
        FROM embeddings e
        JOIN messages m ON m.id = e.message_id
        LEFT JOIN people p ON p.id = m.person_id
        JOIN sources s ON s.id = m.source_id
-       WHERE m.sensitivity IS NOT 'sensible'
+       WHERE e.model = ?
+       AND m.sensitivity IS NOT 'sensible'
        AND (p.excluded IS NULL OR p.excluded = 0)`
     : `SELECT e.message_id, e.vector, m.text, m.timestamp, m.is_user, p.name as author, s.kind as source_kind
        FROM embeddings e
        JOIN messages m ON m.id = e.message_id
        LEFT JOIN people p ON p.id = m.person_id
-       JOIN sources s ON s.id = m.source_id`;
+       JOIN sources s ON s.id = m.source_id
+       WHERE e.model = ?`;
 
-  const rows = await dbQuery(sql);
+  const rows = await dbQuery(sql, [embeddingModel]);
 
-  const scored: MemorySearchResult[] = rows.map((row) => {
+  const scored: MemorySearchResult[] = [];
+  for (const row of rows) {
     const vector = JSON.parse(row.vector as string) as number[];
-    return {
+    if (vector.length !== queryVector.length) continue;
+    scored.push({
       message_id: row.message_id as string,
       text: row.text as string,
       timestamp: row.timestamp as string,
@@ -135,8 +144,8 @@ export async function findSimilarMessages(
       is_user: Boolean(row.is_user),
       source_kind: row.source_kind as string,
       score: cosineSimilarity(queryVector, vector),
-    };
-  });
+    });
+  }
 
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);

@@ -28,12 +28,14 @@ fn split_mbox_messages(content: &str) -> Vec<&str> {
 }
 
 fn split_headers_body(raw: &str) -> (&str, &str) {
-    if let Some(pos) = raw.find("\r\n\r\n") {
-        (&raw[..pos], &raw[pos + 4..])
-    } else if let Some(pos) = raw.find("\n\n") {
-        (&raw[..pos], &raw[pos + 2..])
-    } else {
-        (raw, "")
+    // Pick whichever blank-line separator occurs FIRST so an LF email whose
+    // body contains CRLF text isn't split mid-body.
+    match (raw.find("\r\n\r\n"), raw.find("\n\n")) {
+        (Some(crlf), Some(lf)) if crlf <= lf => (&raw[..crlf], &raw[crlf + 4..]),
+        (Some(_), Some(lf)) => (&raw[..lf], &raw[lf + 2..]),
+        (Some(crlf), None) => (&raw[..crlf], &raw[crlf + 4..]),
+        (None, Some(lf)) => (&raw[..lf], &raw[lf + 2..]),
+        (None, None) => (raw, ""),
     }
 }
 
@@ -163,8 +165,15 @@ fn strip_html_tags(html: &str) -> String {
 }
 
 fn get_boundary(content_type: &str) -> Option<String> {
-    let idx = content_type.to_lowercase().find("boundary=")?;
-    let rest = content_type[idx + "boundary=".len()..].trim_start();
+    // ASCII case-insensitive search directly on `content_type`'s bytes so we
+    // never slice `content_type` with an index computed on `.to_lowercase()`
+    // (which can have a different UTF-8 byte length for characters like `İ`).
+    let needle = b"boundary=";
+    let bytes = content_type.as_bytes();
+    let idx = bytes
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))?;
+    let rest = content_type[idx + needle.len()..].trim_start();
     if let Some(stripped) = rest.strip_prefix('"') {
         let end = stripped.find('"')?;
         Some(stripped[..end].to_string())
@@ -189,9 +198,16 @@ fn extract_plain_text(content_type: &str, transfer_encoding: &str, body: &str) -
         let mut plain: Option<String> = None;
         let mut html: Option<String> = None;
 
-        for part in body.split(delimiter.as_str()) {
+        // Skip element 0: the MIME preamble before the first `--boundary`
+        // (e.g. "This is a multi-part message in MIME format."). Treating it as
+        // a part would set `plain = Some("")` and cause every real part after
+        // it to be skipped.
+        for part in body.split(delimiter.as_str()).skip(1) {
+            if part.starts_with("--") {
+                break;
+            }
             let part = part.trim_start_matches(['\r', '\n']);
-            if part.trim().is_empty() || part.trim_start().starts_with("--") {
+            if part.trim().is_empty() {
                 continue;
             }
             let (part_headers_raw, part_body) = split_headers_body(part);
@@ -234,7 +250,8 @@ fn extract_plain_text(content_type: &str, transfer_encoding: &str, body: &str) -
 fn parse_from_header(raw: &str) -> String {
     let decoded = decode_encoded_words(raw);
     if let Some(lt) = decoded.find('<') {
-        if let Some(gt) = decoded.find('>') {
+        if let Some(rel_gt) = decoded[lt + 1..].find('>') {
+            let gt = lt + 1 + rel_gt;
             let name = decoded[..lt].trim().trim_matches('"').to_string();
             let email = decoded[lt + 1..gt].trim().to_string();
             return if name.is_empty() { email } else { name };
@@ -250,7 +267,7 @@ fn parse_gmail_date(raw: &str) -> Option<String> {
     };
     chrono::DateTime::parse_from_rfc2822(cleaned)
         .ok()
-        .map(|dt| dt.to_rfc3339())
+        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
 }
 
 #[tauri::command]
@@ -269,10 +286,11 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
         .unwrap_or_else(|| path.clone());
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let source_id =
-        import_common::create_source(&conn, "gmail", &file_name).map_err(|e| e.to_string())?;
+        import_common::create_source(&tx, "gmail", &file_name).map_err(|e| e.to_string())?;
     let conversation_id = import_common::get_or_create_conversation(
-        &conn,
+        &tx,
         &source_id,
         "gmail",
         &file_name,
@@ -320,14 +338,14 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
                 participants.push(display.clone());
             }
             let pid =
-                import_common::get_or_create_person(&conn, &display).map_err(|e| e.to_string())?;
-            import_common::ensure_participant(&conn, &conversation_id, &pid)
+                import_common::get_or_create_person(&tx, &display).map_err(|e| e.to_string())?;
+            import_common::ensure_participant(&tx, &conversation_id, &pid)
                 .map_err(|e| e.to_string())?;
             Some(pid)
         };
 
         let inserted = import_common::insert_message_if_new(
-            &conn,
+            &tx,
             &conversation_id,
             &source_id,
             person_id.as_deref(),
@@ -343,6 +361,14 @@ pub fn import_gmail_file(state: State<DbState>, path: String) -> Result<ImportSu
             duplicates += 1;
         }
     }
+
+    if imported == 0 && duplicates == 0 {
+        return Err(
+            "no se encontraron mensajes con contenido legible en el archivo .mbox".to_string(),
+        );
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportSummary {
         source_id,
@@ -541,5 +567,40 @@ mod tests {
     #[test]
     fn parse_gmail_date_returns_none_for_garbage() {
         assert_eq!(parse_gmail_date("not a date"), None);
+    }
+
+    #[test]
+    fn extract_plain_text_skips_mime_preamble() {
+        let body = "This is a multi-part message in MIME format.\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nHola mundo\r\n--B--";
+        let result = extract_plain_text("multipart/alternative; boundary=B", "7bit", body);
+        assert_eq!(
+            result.map(|s| s.trim().to_string()),
+            Some("Hola mundo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_from_header_does_not_panic_when_gt_precedes_lt() {
+        assert_eq!(
+            parse_from_header(r#""Bob > Alice" <bob@example.com>"#),
+            "Bob > Alice"
+        );
+    }
+
+    #[test]
+    fn get_boundary_handles_unicode_expansion_without_panic() {
+        assert_eq!(
+            get_boundary(r#"multipart/mixed; x="İİİİ"; BOUNDARY="b123""#),
+            Some("b123".to_string())
+        );
+    }
+
+    #[test]
+    fn split_headers_body_prefers_earliest_separator() {
+        let raw = "From: a@b\nSubject: hi\n\nline1\r\n\r\nline2";
+        assert_eq!(
+            split_headers_body(raw),
+            ("From: a@b\nSubject: hi", "line1\r\n\r\nline2")
+        );
     }
 }

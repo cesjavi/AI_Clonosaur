@@ -23,23 +23,21 @@ export default function Profile() {
   const [value, setValue] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState<Generator>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
     invoke<ProfileTrait[]>("list_profile_traits")
       .then(setTraits)
+      .catch((e) => setGenError(String(e)))
       .finally(() => setLoading(false));
   }
 
-  // Doesn't call the shared `load()` directly: `loading` already starts as
-  // `true` (see useState above), so the synchronous `setLoading(true)` it
-  // does is redundant here and triggers an extra render pass on mount.
-  // `load()` is still used as-is by the event handlers below, where
-  // re-arming the loading state before a refetch is the point.
   useEffect(() => {
     invoke<ProfileTrait[]>("list_profile_traits")
       .then(setTraits)
+      .catch((e) => setGenError(String(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -52,24 +50,31 @@ export default function Profile() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!category.trim() || !traitName.trim() || !value.trim()) return;
-
-    if (editingId) {
-      await invoke("update_profile_trait", {
-        id: editingId,
-        category,
-        traitName: traitName,
-        value,
-      });
-    } else {
-      await invoke("create_profile_trait", {
-        category,
-        traitName: traitName,
-        value,
-      });
+    if (submitting || !category.trim() || !traitName.trim() || !value.trim()) return;
+    setSubmitting(true);
+    setGenError(null);
+    try {
+      if (editingId) {
+        await invoke("update_profile_trait", {
+          id: editingId,
+          category,
+          traitName: traitName,
+          value,
+        });
+      } else {
+        await invoke("create_profile_trait", {
+          category,
+          traitName: traitName,
+          value,
+        });
+      }
+      resetForm();
+      load();
+    } catch (err) {
+      setGenError(String(err));
+    } finally {
+      setSubmitting(false);
     }
-    resetForm();
-    load();
   }
 
   function startEdit(t: ProfileTrait) {
@@ -80,9 +85,14 @@ export default function Profile() {
   }
 
   async function remove(id: string) {
-    await invoke("delete_profile_trait", { id });
-    if (editingId === id) resetForm();
-    load();
+    setGenError(null);
+    try {
+      await invoke("delete_profile_trait", { id });
+      if (editingId === id) resetForm();
+      load();
+    } catch (err) {
+      setGenError(String(err));
+    }
   }
 
   async function runGenerator(generator: Generator, command: string) {
@@ -122,59 +132,61 @@ export default function Profile() {
       {genError && <p className="profile-gen-error">{genError}</p>}
 
       <div className="profile-body">
-      <form className="profile-form" onSubmit={handleSubmit}>
-        <h2>{editingId ? "Editar rasgo" : "Nuevo rasgo de perfil"}</h2>
-        <input
-          placeholder="Categoría (ej. valores, gustos, estilo)"
-          value={category}
-          onChange={(e) => setCategory(e.currentTarget.value)}
-        />
-        <input
-          placeholder="Rasgo (ej. 'sentido del humor')"
-          value={traitName}
-          onChange={(e) => setTraitName(e.currentTarget.value)}
-        />
-        <textarea
-          placeholder="Valor / descripción"
-          rows={2}
-          value={value}
-          onChange={(e) => setValue(e.currentTarget.value)}
-        />
-        <div className="profile-form-actions">
-          <button type="submit">{editingId ? "Guardar cambios" : "Agregar"}</button>
-          {editingId && (
-            <button type="button" onClick={resetForm}>
-              Cancelar
+        <form className="profile-form" onSubmit={handleSubmit}>
+          <h2>{editingId ? "Editar rasgo" : "Nuevo rasgo de perfil"}</h2>
+          <input
+            placeholder="Categoría (ej. valores, gustos, estilo)"
+            value={category}
+            onChange={(e) => setCategory(e.currentTarget.value)}
+          />
+          <input
+            placeholder="Rasgo (ej. 'sentido del humor')"
+            value={traitName}
+            onChange={(e) => setTraitName(e.currentTarget.value)}
+          />
+          <textarea
+            placeholder="Valor / descripción"
+            rows={2}
+            value={value}
+            onChange={(e) => setValue(e.currentTarget.value)}
+          />
+          <div className="profile-form-actions">
+            <button type="submit" disabled={submitting}>
+              {editingId ? "Guardar cambios" : "Agregar"}
             </button>
-          )}
-        </div>
-      </form>
-
-      <div className="profile-list">
-        {loading && <p>Cargando perfil…</p>}
-        {!loading && traits.length === 0 && (
-          <p className="profile-empty">Todavía no hay rasgos de perfil guardados.</p>
-        )}
-        {Object.entries(grouped).map(([cat, items]) => (
-          <div key={cat} className="profile-category">
-            <h3>{cat}</h3>
-            {items.map((t) => (
-              <div key={t.id} className="profile-trait">
-                <div>
-                  <strong>{t.trait_name}</strong>
-                  <p>{t.value}</p>
-                  {t.evidence && <p className="profile-evidence">Evidencia: "{t.evidence}"</p>}
-                  <span className="profile-source">{t.source}</span>
-                </div>
-                <div className="profile-trait-actions">
-                  <button onClick={() => startEdit(t)}>Editar</button>
-                  <button onClick={() => remove(t.id)}>Borrar</button>
-                </div>
-              </div>
-            ))}
+            {editingId && (
+              <button type="button" onClick={resetForm}>
+                Cancelar
+              </button>
+            )}
           </div>
-        ))}
-      </div>
+        </form>
+
+        <div className="profile-list">
+          {loading && <p>Cargando perfil…</p>}
+          {!loading && traits.length === 0 && (
+            <p className="profile-empty">Todavía no hay rasgos de perfil guardados.</p>
+          )}
+          {Object.entries(grouped).map(([cat, items]) => (
+            <div key={cat} className="profile-category">
+              <h3>{cat}</h3>
+              {items.map((t) => (
+                <div key={t.id} className="profile-trait">
+                  <div>
+                    <strong>{t.trait_name}</strong>
+                    <p>{t.value}</p>
+                    {t.evidence && <p className="profile-evidence">Evidencia: "{t.evidence}"</p>}
+                    <span className="profile-source">{t.source}</span>
+                  </div>
+                  <div className="profile-trait-actions">
+                    <button onClick={() => startEdit(t)}>Editar</button>
+                    <button onClick={() => remove(t.id)}>Borrar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

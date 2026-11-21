@@ -26,6 +26,24 @@ export async function importRedditFile(fileName: string, bytes: Uint8Array): Pro
     );
   }
 
+  const parsedRows: [string, string][] = [];
+  for (const row of rows.slice(1)) {
+    const title = titleIdx !== -1 ? (row[titleIdx] ?? "").trim() : "";
+    const body = bodyIdx !== -1 ? (row[bodyIdx] ?? "").trim() : "";
+
+    let text: string;
+    if (title && body) text = `${title}\n\n${body}`;
+    else if (title) text = title;
+    else if (body) text = body;
+    else continue;
+
+    const timestamp = importCommon.normalizeTimestamp(row[dateIdx] ?? "");
+    parsedRows.push([text, timestamp]);
+  }
+  if (parsedRows.length === 0) {
+    throw new Error("no se encontraron mensajes en el archivo CSV");
+  }
+
   const sourceId = await importCommon.createSource("reddit", fileName);
   const conversationId = await importCommon.getOrCreateConversation(
     sourceId,
@@ -38,18 +56,7 @@ export async function importRedditFile(fileName: string, bytes: Uint8Array): Pro
   let imported = 0;
   let duplicates = 0;
 
-  for (const row of rows.slice(1)) {
-    const title = titleIdx !== -1 ? (row[titleIdx] ?? "").trim() : "";
-    const body = bodyIdx !== -1 ? (row[bodyIdx] ?? "").trim() : "";
-
-    let text: string;
-    if (title && body) text = `${title}\n\n${body}`;
-    else if (title) text = title;
-    else if (body) text = body;
-    else continue;
-
-    const timestamp = importCommon.normalizeTimestamp(row[dateIdx] ?? "");
-
+  for (const [text, timestamp] of parsedRows) {
     const inserted = await importCommon.insertMessageIfNew(
       conversationId,
       sourceId,

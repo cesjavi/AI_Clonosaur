@@ -1,8 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { invoke, isTauri } from "./backend/invoke";
 import "./Settings.css";
+
+// Persists across navigating away from Settings so a user cannot start two
+// concurrent downloads of the same Whisper model.
+const activeDownloads = new Set<string>();
 
 interface SettingsForm {
   ollama_base_url: string;
@@ -45,9 +49,10 @@ export default function Settings({ onSaved }: Props) {
     theme: "system",
   });
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const [modelStatus, setModelStatus] = useState<WhisperModelStatus[]>([]);
-  const [downloading, setDownloading] = useState<Set<string>>(new Set());
+  const [downloading, setDownloading] = useState<Set<string>>(() => new Set(activeDownloads));
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const [updateState, setUpdateState] = useState<
@@ -56,22 +61,47 @@ export default function Settings({ onSaved }: Props) {
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
 
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingUpdateRef = useRef<Update | null>(null);
+  const mountedRef = useRef(true);
+
   useEffect(() => {
-    invoke<Record<string, string>>("get_settings").then((s) => {
-      setForm({
-        ollama_base_url: s.ollama_base_url ?? "",
-        chat_model: s.chat_model ?? "",
-        embedding_model: s.embedding_model ?? "",
-        local_api_style: s.local_api_style ?? "ollama",
-        whisper_model: s.whisper_model ?? "base",
-        theme: s.theme ?? "system",
+    mountedRef.current = true;
+    invoke<Record<string, string>>("get_settings")
+      .then((s) => {
+        if (!mountedRef.current) return;
+        setForm({
+          ollama_base_url: s.ollama_base_url ?? "",
+          chat_model: s.chat_model ?? "",
+          embedding_model: s.embedding_model ?? "",
+          local_api_style: s.local_api_style ?? "ollama",
+          whisper_model: s.whisper_model ?? "base",
+          theme: s.theme ?? "system",
+        });
+      })
+      .catch((e) => {
+        if (mountedRef.current) setSaveError(String(e));
       });
-    });
     refreshModelStatus();
+    return () => {
+      mountedRef.current = false;
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      pendingUpdateRef.current?.close().catch(() => { });
+      pendingUpdateRef.current = null;
+    };
   }, []);
 
   function refreshModelStatus() {
-    invoke<WhisperModelStatus[]>("list_whisper_models").then(setModelStatus);
+    invoke<WhisperModelStatus[]>("list_whisper_models")
+      .then((list) => {
+        if (mountedRef.current) setModelStatus(list);
+      })
+      .catch((e) => {
+        if (mountedRef.current) setDownloadError(String(e));
+      });
   }
 
   async function checkUpdates() {
@@ -79,6 +109,12 @@ export default function Settings({ onSaved }: Props) {
     setUpdateError(null);
     try {
       const update = await checkForUpdate();
+      pendingUpdateRef.current?.close().catch(() => { });
+      pendingUpdateRef.current = update;
+      if (!mountedRef.current) {
+        update?.close().catch(() => { });
+        return;
+      }
       if (update) {
         setPendingUpdate(update);
         setUpdateState("available");
@@ -87,8 +123,10 @@ export default function Settings({ onSaved }: Props) {
         setUpdateState("up-to-date");
       }
     } catch (e) {
-      setUpdateError(String(e));
-      setUpdateState("error");
+      if (mountedRef.current) {
+        setUpdateError(String(e));
+        setUpdateState("error");
+      }
     }
   }
 
@@ -100,26 +138,26 @@ export default function Settings({ onSaved }: Props) {
       await pendingUpdate.downloadAndInstall();
       await relaunch();
     } catch (e) {
-      setUpdateError(String(e));
-      setUpdateState("error");
+      if (mountedRef.current) {
+        setUpdateError(String(e));
+        setUpdateState("error");
+      }
     }
   }
 
   async function downloadModel(model: string) {
-    if (downloading.has(model)) return;
-    setDownloading((prev) => new Set(prev).add(model));
+    if (activeDownloads.has(model)) return;
+    activeDownloads.add(model);
+    setDownloading(new Set(activeDownloads));
     setDownloadError(null);
     try {
       await invoke("download_whisper_model", { model });
       refreshModelStatus();
     } catch (e) {
-      setDownloadError(String(e));
+      if (mountedRef.current) setDownloadError(String(e));
     } finally {
-      setDownloading((prev) => {
-        const next = new Set(prev);
-        next.delete(model);
-        return next;
-      });
+      activeDownloads.delete(model);
+      if (mountedRef.current) setDownloading(new Set(activeDownloads));
     }
   }
 
@@ -136,18 +174,28 @@ export default function Settings({ onSaved }: Props) {
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    await Promise.all([
-      invoke("update_setting", { key: "ollama_base_url", value: form.ollama_base_url }),
-      invoke("update_setting", { key: "chat_model", value: form.chat_model }),
-      invoke("update_setting", { key: "embedding_model", value: form.embedding_model }),
-      invoke("update_setting", { key: "local_api_style", value: form.local_api_style }),
-      invoke("update_setting", { key: "whisper_model", value: form.whisper_model }),
-      invoke("update_setting", { key: "theme", value: form.theme }),
-      invoke("update_setting", { key: "onboarding_completed", value: "true" }),
-    ]);
-    setSaved(true);
-    onSaved?.();
-    setTimeout(() => setSaved(false), 2000);
+    setSaveError(null);
+    try {
+      await Promise.all([
+        invoke("update_setting", { key: "ollama_base_url", value: form.ollama_base_url }),
+        invoke("update_setting", { key: "chat_model", value: form.chat_model }),
+        invoke("update_setting", { key: "embedding_model", value: form.embedding_model }),
+        invoke("update_setting", { key: "local_api_style", value: form.local_api_style }),
+        invoke("update_setting", { key: "whisper_model", value: form.whisper_model }),
+        invoke("update_setting", { key: "theme", value: form.theme }),
+        invoke("update_setting", { key: "onboarding_completed", value: "true" }),
+      ]);
+      if (!mountedRef.current) return;
+      setSaved(true);
+      onSaved?.();
+      if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        saveTimerRef.current = null;
+        setSaved(false);
+      }, 2000);
+    } catch (err) {
+      if (mountedRef.current) setSaveError(String(err));
+    }
   }
 
   return (
@@ -224,6 +272,7 @@ export default function Settings({ onSaved }: Props) {
         </label>
         <button type="submit">Guardar</button>
         {saved && <span className="settings-saved">Guardado ✓</span>}
+        {saveError && <p className="chat-error">{saveError}</p>}
       </form>
 
       <div className="settings-voice">

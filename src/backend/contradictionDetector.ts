@@ -12,7 +12,13 @@ interface ContradictionFinding {
  * reusing the same review flow instead of a new screen. */
 export async function detectContradictions(): Promise<number> {
   const rows = await dbQuery(
-    "SELECT content, created_at FROM memories WHERE status IN ('confirmed','edited') ORDER BY created_at",
+    `SELECT mem.content, mem.created_at FROM memories mem
+     WHERE mem.status IN ('confirmed','edited')
+     AND NOT EXISTS (
+       SELECT 1 FROM messages ms
+       WHERE ms.id = mem.source_message_id AND ms.sensitivity = 'sensible'
+     )
+     ORDER BY mem.created_at`,
   );
   const memories: [string, string][] = rows.map((r) => [r.content as string, r.created_at as string]);
 
@@ -32,7 +38,7 @@ ${evidenceBlock}`;
   let created = 0;
 
   for (const finding of findings) {
-    if (!finding.content?.trim()) continue;
+    if (!finding || typeof finding.content !== "string" || !finding.content.trim()) continue;
     const evidenceText = llm.valueToText(finding.evidence);
     const metadata = JSON.stringify({ evidence: evidenceText });
 

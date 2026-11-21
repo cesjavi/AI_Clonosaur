@@ -84,22 +84,31 @@ pub async fn download_whisper_model(app: AppHandle, model: String) -> Result<Str
         return Err(format!("descarga del modelo respondió {}", res.status()));
     }
 
-    let tmp_dest = dest.with_extension("part");
-    {
+    let tmp_dest = models_dir(&app)?.join(format!("ggml-{model}.{}.part", uuid::Uuid::new_v4()));
+    let write_res: Result<(), String> = async {
         let mut file = std::fs::File::create(&tmp_dest).map_err(|e| e.to_string())?;
         let mut stream = res.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("descarga interrumpida: {e}"))?;
             std::io::Write::write_all(&mut file, &chunk).map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
-    std::fs::rename(&tmp_dest, &dest).map_err(|e| e.to_string())?;
+    .await;
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp_dest);
+        return Err(e);
+    }
 
-    // Drop any cached in-memory context for this model: otherwise
-    // `transcribe_audio` keeps serving the stale pre-redownload version
-    // (e.g. if the previous file was corrupted) until the app restarts.
+    // Drop any cached in-memory context BEFORE renaming so Windows does not
+    // refuse to replace an open/mmapped model file.
     if let Some(state) = app.try_state::<TranscriptionState>() {
         state.0.lock().map_err(|e| e.to_string())?.remove(&model);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_dest, &dest) {
+        let _ = std::fs::remove_file(&tmp_dest);
+        return Err(e.to_string());
     }
 
     Ok(model.clone())
@@ -168,8 +177,8 @@ pub async fn transcribe_audio(
         let mut text = String::new();
         for i in 0..whisper_state.full_n_segments() {
             if let Some(segment) = whisper_state.get_segment(i) {
-                if let Ok(segment_text) = segment.to_str() {
-                    text.push_str(segment_text);
+                if let Ok(segment_text) = segment.to_str_lossy() {
+                    text.push_str(&segment_text);
                 }
             }
         }

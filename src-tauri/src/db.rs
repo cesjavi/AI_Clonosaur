@@ -31,11 +31,11 @@ pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
 /// for databases created before certain columns existed. Shared by the
 /// normal startup path, `vault::unlock` (after decrypting), and
 /// `vault::reset_database` (fresh empty database) so all three stay in sync.
-pub(crate) fn apply_schema(conn: &Connection) {
+pub(crate) fn apply_schema(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "foreign_keys", true)
-        .expect("no se pudo activar foreign_keys");
+        .map_err(|e| format!("no se pudo activar foreign_keys: {e}"))?;
     conn.execute_batch(SCHEMA)
-        .expect("no se pudo aplicar el schema de clonosaur.db");
+        .map_err(|e| format!("no se pudo aplicar el schema de clonosaur.db: {e}"))?;
 
     // Ad-hoc patch for databases created before this column was added: CREATE
     // TABLE IF NOT EXISTS doesn't alter tables that already exist. Expected
@@ -49,6 +49,7 @@ pub(crate) fn apply_schema(conn: &Connection) {
     );
 
     seed_default_groq_provider(conn);
+    Ok(())
 }
 
 /// Opens (or creates) the local database and applies the core schema idempotently.
@@ -63,12 +64,12 @@ pub fn init_db(app: &AppHandle) -> Connection {
     if crate::vault::is_configured(app) && !db_path(app).exists() {
         let conn =
             Connection::open_in_memory().expect("no se pudo abrir la base temporal en memoria");
-        apply_schema(&conn);
+        apply_schema(&conn).expect("no se pudo aplicar el schema en la base temporal");
         return conn;
     }
 
     let conn = Connection::open(db_path(app)).expect("no se pudo abrir clonosaur.db");
-    apply_schema(&conn);
+    apply_schema(&conn).expect("no se pudo aplicar el schema de clonosaur.db");
     conn
 }
 

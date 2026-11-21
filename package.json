@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:tauri": "tsc && vite build && node scripts/prune-tauri-dist.mjs",
+    "build:tauri": "tsc && vite build --mode tauri && node scripts/prune-tauri-dist.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "lint": "eslint .",

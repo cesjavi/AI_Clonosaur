@@ -16,13 +16,33 @@ function getWorker(): Comlink.Remote<DbWorkerApi> {
   return workerApi;
 }
 
+let onMutatedListener: (() => void) | null = null;
+
+/** Registers a hook invoked after every write (`dbRun` / `dbRunBatch`) — used
+ * by `vault.ts` to schedule an encrypted snapshot persist when running in
+ * in-memory vault mode so edits are never silently lost on tab close/reload. */
+export function setOnDbMutated(listener: (() => void) | null): void {
+  onMutatedListener = listener;
+}
+
 export function dbQuery(sql: string, params: SQLiteCompatibleType[] = []): Promise<Record<string, unknown>[]> {
   return getWorker().query(sql, params);
 }
 
 /** Resolves to the number of rows affected. */
-export function dbRun(sql: string, params: SQLiteCompatibleType[] = []): Promise<number> {
-  return getWorker().run(sql, params);
+export async function dbRun(sql: string, params: SQLiteCompatibleType[] = []): Promise<number> {
+  const changes = await getWorker().run(sql, params);
+  onMutatedListener?.();
+  return changes;
+}
+
+/** Executes statements atomically in a single SQLite transaction. */
+export async function dbRunBatch(
+  statements: { sql: string; params?: SQLiteCompatibleType[] }[],
+): Promise<number[]> {
+  const counts = await getWorker().runBatch(statements);
+  onMutatedListener?.();
+  return counts;
 }
 
 /** Vault support (see vault.ts) — exports the live database as raw bytes,
@@ -41,8 +61,8 @@ export function dbWipePlaintextStorage(): Promise<void> {
   return getWorker().wipePlaintextStorage();
 }
 
-if (typeof window !== "undefined") {
-  // Manual debugging aid for the web build — inspect any table from the
-  // browser console with `await __clonosaurDb.query("SELECT * FROM ...")`.
+if (typeof window !== "undefined" && import.meta.env.DEV) {
+  // Dev-only debugging aid for the web build — never exposed in production so
+  // scripts/extensions can't bypass API-key hiding or read decrypted vault data.
   (window as unknown as { __clonosaurDb: unknown }).__clonosaurDb = { dbQuery, dbRun };
 }

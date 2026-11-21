@@ -1,3 +1,4 @@
+use std::io::Read;
 use tauri::State;
 
 use crate::db::DbState;
@@ -47,19 +48,31 @@ fn parse_whatsapp_timestamp(date_str: &str, time_str: &str) -> Option<String> {
         year += 2000;
     }
 
-    let time_str = time_str.trim();
-    let (time_main, meridiem) = if let Some(s) = time_str
-        .strip_suffix("AM")
-        .or_else(|| time_str.strip_suffix("a. m."))
+    // Normalize non-breaking / narrow-no-break spaces used by Android/iOS
+    // Spanish exports ("10:15\u{202f}p.\u{00a0}m.") to plain ASCII spaces.
+    let time_normalized: String = time_str
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\u{00A0}' | '\u{202F}' | '\u{2007}' => ' ',
+            _ => c,
+        })
+        .collect();
+    let time_lower = time_normalized.to_lowercase();
+    let (time_main, meridiem) = if let Some(s) = time_lower
+        .strip_suffix("a. m.")
+        .or_else(|| time_lower.strip_suffix("a.m."))
+        .or_else(|| time_lower.strip_suffix("am"))
     {
         (s.trim(), Some(false))
-    } else if let Some(s) = time_str
-        .strip_suffix("PM")
-        .or_else(|| time_str.strip_suffix("p. m."))
+    } else if let Some(s) = time_lower
+        .strip_suffix("p. m.")
+        .or_else(|| time_lower.strip_suffix("p.m."))
+        .or_else(|| time_lower.strip_suffix("pm"))
     {
         (s.trim(), Some(true))
     } else {
-        (time_str, None)
+        (time_lower.as_str(), None)
     };
 
     let time_bits: Vec<&str> = time_main.split(':').collect();
@@ -98,9 +111,15 @@ fn parse_header_datetime(header: &str) -> Option<String> {
 /// discarded; multi-line messages are appended to the last real message.
 fn parse_whatsapp_text(content: &str) -> Vec<ParsedMessage> {
     let mut messages: Vec<ParsedMessage> = Vec::new();
+    let mut in_system_message = false;
 
     for raw_line in content.lines() {
-        let line = raw_line.trim_end_matches('\r');
+        // Strip trailing CR and leading UTF-8 BOM / Unicode directional marks
+        // (iOS exports routinely prefix lines with U+200E LRM).
+        let line = raw_line.trim_end_matches('\r').trim_start_matches([
+            '\u{FEFF}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}',
+        ]);
         if line.trim().is_empty() {
             continue;
         }
@@ -115,29 +134,47 @@ fn parse_whatsapp_text(content: &str) -> Vec<ParsedMessage> {
                         text: text.trim().to_string(),
                         timestamp,
                     });
+                    in_system_message = false;
+                } else {
+                    in_system_message = true;
                 }
                 continue;
             }
         }
 
-        if let Some(last) = messages.last_mut() {
-            last.text.push('\n');
-            last.text.push_str(line.trim());
+        if !in_system_message {
+            if let Some(last) = messages.last_mut() {
+                last.text.push('\n');
+                last.text.push_str(line.trim());
+            }
         }
     }
 
     messages
 }
 
+const MAX_ZIP_TEXT_BYTES: u64 = 100 * 1024 * 1024; // 100 MiB safety cap
+
 fn read_whatsapp_content(path: &str) -> Result<String, String> {
     if path.to_lowercase().ends_with(".zip") {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-            if entry.name().to_lowercase().ends_with(".txt") {
+            let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let entry_name = entry.name().to_string();
+            let base_name = entry_name.rsplit('/').next().unwrap_or(&entry_name);
+            if entry_name.starts_with("__MACOSX/") || base_name.starts_with("._") {
+                continue;
+            }
+            if entry_name.to_lowercase().ends_with(".txt") {
                 let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| e.to_string())?;
+                std::io::Read::read_to_end(&mut entry.take(MAX_ZIP_TEXT_BYTES + 1), &mut buf)
+                    .map_err(|e| e.to_string())?;
+                if buf.len() as u64 > MAX_ZIP_TEXT_BYTES {
+                    return Err(
+                        "el archivo .txt dentro del .zip supera el límite de 100 MB".to_string()
+                    );
+                }
                 return Ok(String::from_utf8_lossy(&buf).to_string());
             }
         }
@@ -179,10 +216,11 @@ pub fn import_whatsapp_file(state: State<DbState>, path: String) -> Result<Impor
     let external_id = fingerprint_parts.join("|").to_lowercase();
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let source_id =
-        import_common::create_source(&conn, "whatsapp", &file_name).map_err(|e| e.to_string())?;
+        import_common::create_source(&tx, "whatsapp", &file_name).map_err(|e| e.to_string())?;
     let conversation_id = import_common::get_or_create_conversation(
-        &conn,
+        &tx,
         &source_id,
         "whatsapp",
         &file_name,
@@ -194,17 +232,17 @@ pub fn import_whatsapp_file(state: State<DbState>, path: String) -> Result<Impor
     let mut duplicates = 0usize;
 
     for msg in parsed {
-        let person_id =
-            import_common::get_or_create_person(&conn, &msg.author).map_err(|e| e.to_string())?;
-        import_common::ensure_participant(&conn, &conversation_id, &person_id)
+        let (person_id, is_user) = import_common::get_or_create_person_with_flag(&tx, &msg.author)
+            .map_err(|e| e.to_string())?;
+        import_common::ensure_participant(&tx, &conversation_id, &person_id)
             .map_err(|e| e.to_string())?;
 
         let inserted = import_common::insert_message_if_new(
-            &conn,
+            &tx,
             &conversation_id,
             &source_id,
             Some(&person_id),
-            false,
+            is_user,
             &msg.text,
             &msg.timestamp,
         )
@@ -216,6 +254,8 @@ pub fn import_whatsapp_file(state: State<DbState>, path: String) -> Result<Impor
             duplicates += 1;
         }
     }
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportSummary {
         source_id,

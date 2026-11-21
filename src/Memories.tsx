@@ -59,8 +59,13 @@ export default function Memories() {
   }
 
   async function setStatus(id: string, status: string, content?: string) {
-    await invoke("update_memory_status", { id, status, content: content ?? null });
-    load();
+    setError(null);
+    try {
+      await invoke("update_memory_status", { id, status, content: content ?? null });
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   function startEdit(m: MemoryItem) {
@@ -69,7 +74,8 @@ export default function Memories() {
   }
 
   async function saveEdit(id: string) {
-    await setStatus(id, "edited", editingText);
+    if (!editingText.trim()) return;
+    await setStatus(id, "edited", editingText.trim());
     setEditingId(null);
   }
 

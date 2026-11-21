@@ -37,7 +37,7 @@ pub async fn generate_draft(
     contact_person_id: Option<String>,
     instruction: String,
 ) -> Result<Draft, String> {
-    let contact_name: Option<String> = {
+    let (contact_name, contact_relationship): (Option<String>, Option<String>) = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         if let Some(pid) = &contact_person_id {
             if is_excluded(&conn, pid)? {
@@ -46,21 +46,34 @@ pub async fn generate_draft(
                         .to_string(),
                 );
             }
-            conn.query_row(
-                "SELECT name FROM people WHERE id = ?1",
-                params![pid],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
+            let row = conn
+                .query_row(
+                    "SELECT name, relationship FROM people WHERE id = ?1",
+                    params![pid],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            match row {
+                Some((name, rel)) => (Some(name), rel),
+                None => return Err(format!("no existe el contacto seleccionado ({pid})")),
+            }
         } else {
-            None
+            (None, None)
         }
+    };
+
+    let prompt = match (&contact_name, &contact_relationship) {
+        (Some(name), Some(rel)) => {
+            format!("Destinatario: {name} (relación: {rel}).\n{instruction}")
+        }
+        (Some(name), None) => format!("Destinatario: {name}.\n{instruction}"),
+        _ => instruction,
     };
 
     let history = vec![ChatMessage {
         role: "user".to_string(),
-        content: instruction,
+        content: prompt,
     }];
     let (messages, _sources) = chat::build_rag_messages(state.inner(), &history).await?;
     let content = chat::call_ollama_chat(state.inner(), &messages).await?;

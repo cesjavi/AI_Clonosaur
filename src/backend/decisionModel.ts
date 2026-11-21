@@ -31,7 +31,8 @@ ${evidence}`;
   let created = 0;
 
   for (const finding of findings) {
-    if (!finding.trait?.trim() || !finding.value?.trim()) continue;
+    if (!finding || typeof finding.trait !== "string" || typeof finding.value !== "string") continue;
+    if (!finding.trait.trim() || !finding.value.trim()) continue;
     const evidenceText = llm.valueToText(finding.evidence);
     if (await insertTraitIfNew("toma_decisiones", finding.trait, finding.value, evidenceText, now)) {
       created += 1;

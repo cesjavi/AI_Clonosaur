@@ -11,7 +11,7 @@ interface GenericRecord {
 function parseCsvRecords(content: string): GenericRecord[] {
   const rows = importCommon.parseCsv(content);
   if (rows.length === 0) return [];
-  const headers = rows[0];
+  const headers = rows[0].map((h) => h.trim().toLowerCase());
   const textIdx = headers.indexOf("text");
   if (textIdx === -1) throw new Error("el CSV necesita una columna 'text'");
   const timestampIdx = headers.indexOf("timestamp");
@@ -24,8 +24,9 @@ function parseCsvRecords(content: string): GenericRecord[] {
     if (!text) continue;
     const timestamp = timestampIdx !== -1 ? row[timestampIdx]?.trim() || null : null;
     const author = authorIdx !== -1 ? row[authorIdx]?.trim() || null : null;
-    const isUserRaw = isUserIdx !== -1 ? row[isUserIdx] : undefined;
-    const isUser = isUserRaw === undefined ? null : isUserRaw === "true" || isUserRaw === "1";
+    const isUserRaw = isUserIdx !== -1 ? row[isUserIdx]?.trim() : undefined;
+    const isUser =
+      !isUserRaw ? null : isUserRaw.toLowerCase() === "true" || isUserRaw === "1";
     records.push({ text, timestamp, author, is_user: isUser });
   }
   return records;
@@ -36,7 +37,7 @@ function parseCsvRecords(content: string): GenericRecord[] {
  * `author?`/`is_user?`, or plain `.txt` (one line = one of the user's own
  * messages). */
 export async function importGenericFile(fileName: string, bytes: Uint8Array): Promise<ImportSummary> {
-  const content = new TextDecoder("utf-8").decode(bytes);
+  const content = new TextDecoder("utf-8").decode(bytes).replace(/^\uFEFF/, "");
   const lower = fileName.toLowerCase();
 
   let records: GenericRecord[];
@@ -50,7 +51,21 @@ export async function importGenericFile(fileName: string, bytes: Uint8Array): Pr
     if (!Array.isArray(parsed)) {
       throw new Error("el JSON tiene que ser un array de registros");
     }
-    records = parsed as GenericRecord[];
+    records = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object" || typeof (item as { text?: unknown }).text !== "string") {
+        throw new Error("cada registro del JSON necesita un campo 'text' de tipo string");
+      }
+      const r = item as { text: string; timestamp?: unknown; author?: unknown; is_user?: unknown };
+      const text = r.text.trim();
+      if (!text) continue;
+      records.push({
+        text,
+        timestamp: typeof r.timestamp === "string" && r.timestamp.trim() ? r.timestamp.trim() : null,
+        author: typeof r.author === "string" && r.author.trim() ? r.author.trim() : null,
+        is_user: typeof r.is_user === "boolean" ? r.is_user : null,
+      });
+    }
   } else if (lower.endsWith(".csv")) {
     records = parseCsvRecords(content);
   } else {
@@ -66,9 +81,6 @@ export async function importGenericFile(fileName: string, bytes: Uint8Array): Pr
   }
 
   const sourceId = await importCommon.createSource("generic", fileName);
-  // The file name is the "thread" fingerprint: reimporting the same file
-  // lands in the same conversation, and duplicate detection avoids
-  // repeating messages.
   const conversationId = await importCommon.getOrCreateConversation(
     sourceId,
     "generic",
@@ -80,27 +92,24 @@ export async function importGenericFile(fileName: string, bytes: Uint8Array): Pr
   let imported = 0;
   let duplicates = 0;
   const participants: string[] = [];
-  // Caches resolved person ids by author name so a large import with only a
-  // handful of distinct authors doesn't issue a person-lookup round trip per
-  // message.
-  const personIdCache = new Map<string, string>();
+  const personCache = new Map<string, { id: string; isUser: boolean }>();
 
   for (const rec of records) {
-    const timestamp = rec.timestamp ?? new Date().toISOString();
+    const hasTimestamp = Boolean(rec.timestamp);
+    const timestamp = rec.timestamp ? importCommon.normalizeTimestamp(rec.timestamp) : new Date().toISOString();
 
     let personId: string | null = null;
     let isUser: boolean;
     if (rec.author) {
       if (!participants.includes(rec.author)) participants.push(rec.author);
-      const cached = personIdCache.get(rec.author);
-      if (cached) {
-        personId = cached;
-      } else {
-        personId = await importCommon.getOrCreatePerson(rec.author);
-        await importCommon.ensureParticipant(conversationId, personId);
-        personIdCache.set(rec.author, personId);
+      let person = personCache.get(rec.author);
+      if (!person) {
+        person = await importCommon.getOrCreatePersonWithFlag(rec.author);
+        await importCommon.ensureParticipant(conversationId, person.id);
+        personCache.set(rec.author, person);
       }
-      isUser = rec.is_user ?? false;
+      personId = person.id;
+      isUser = rec.is_user ?? person.isUser;
     } else {
       isUser = rec.is_user ?? true;
     }
@@ -113,6 +122,7 @@ export async function importGenericFile(fileName: string, bytes: Uint8Array): Pr
       rec.text,
       timestamp,
       isDuplicate,
+      hasTimestamp,
     );
 
     if (inserted) imported += 1;

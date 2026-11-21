@@ -3,6 +3,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::db::DbState;
+use crate::settings::{self, DEFAULT_EMBEDDING_MODEL};
 
 #[derive(Serialize)]
 pub struct Metrics {
@@ -27,6 +28,8 @@ pub struct Metrics {
 /// PLAN_TECNICO.md ("metrics panel... never hardcoded").
 #[tauri::command]
 pub fn get_metrics(state: State<DbState>) -> Result<Metrics, String> {
+    let embedding_model =
+        settings::get_setting_from_db(state.inner(), "embedding_model", DEFAULT_EMBEDDING_MODEL);
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     let count = |sql: &str| -> Result<i64, String> {
@@ -41,10 +44,17 @@ pub fn get_metrics(state: State<DbState>) -> Result<Metrics, String> {
         )
         .map_err(|e| e.to_string())
     };
+    let messages_with_embedding: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE model = ?1",
+            params![embedding_model],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
 
     Ok(Metrics {
         total_messages: count("SELECT COUNT(*) FROM messages")?,
-        messages_with_embedding: count("SELECT COUNT(*) FROM embeddings")?,
+        messages_with_embedding,
         sensitive_messages: count("SELECT COUNT(*) FROM messages WHERE sensitivity = 'sensible'")?,
         memories_candidate: count_status("memories", "candidate")?,
         memories_confirmed: count_status("memories", "confirmed")?,

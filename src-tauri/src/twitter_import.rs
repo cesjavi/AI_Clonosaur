@@ -23,8 +23,9 @@ fn parse_twitter_archive(content: &str) -> Result<Vec<TweetData>, String> {
     let json_start = content
         .find('[')
         .ok_or("no se encontró el array de tweets en el archivo")?;
-    let wrappers: Vec<TweetWrapper> = serde_json::from_str(&content[json_start..])
-        .map_err(|e| format!("JSON de tweets inválido: {e}"))?;
+    let raw_json = content[json_start..].trim_end().trim_end_matches(';');
+    let wrappers: Vec<TweetWrapper> =
+        serde_json::from_str(raw_json).map_err(|e| format!("JSON de tweets inválido: {e}"))?;
     Ok(wrappers.into_iter().map(|w| w.tweet).collect())
 }
 
@@ -32,7 +33,7 @@ fn parse_twitter_timestamp(created_at: &str) -> Option<String> {
     // Twitter format: "Wed Oct 10 20:19:24 +0000 2018"
     chrono::DateTime::parse_from_str(created_at, "%a %b %d %H:%M:%S %z %Y")
         .ok()
-        .map(|dt| dt.to_rfc3339())
+        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
 }
 
 /// A Twitter/X archive only contains the tweets of whoever requested the
@@ -48,6 +49,11 @@ pub fn import_twitter_file(
     path: String,
     username: String,
 ) -> Result<ImportSummary, String> {
+    let username = username.trim().to_string();
+    if username.is_empty() {
+        return Err("tenés que indicar un usuario de Twitter/X".to_string());
+    }
+
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let tweets = parse_twitter_archive(&content)?;
 
@@ -61,24 +67,20 @@ pub fn import_twitter_file(
         .unwrap_or_else(|| path.clone());
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let source_id =
-        import_common::create_source(&conn, "twitter", &file_name).map_err(|e| e.to_string())?;
-    // Fingerprinted by username, not file name: an archive only ever
-    // contains one account's tweets, so the username is a stable identity
-    // for the conversation across re-downloads (which commonly get renamed
-    // with a "(1)" suffix or a different export timestamp), unlike the file
-    // name.
+        import_common::create_source(&tx, "twitter", &file_name).map_err(|e| e.to_string())?;
     let conversation_id = import_common::get_or_create_conversation(
-        &conn,
+        &tx,
         &source_id,
         "twitter",
         &file_name,
         Some(&username.to_lowercase()),
     )
     .map_err(|e| e.to_string())?;
-    let person_id =
-        import_common::get_or_create_person(&conn, &username).map_err(|e| e.to_string())?;
-    import_common::ensure_participant(&conn, &conversation_id, &person_id)
+    let (person_id, is_user) =
+        import_common::get_or_create_person_with_flag(&tx, &username).map_err(|e| e.to_string())?;
+    import_common::ensure_participant(&tx, &conversation_id, &person_id)
         .map_err(|e| e.to_string())?;
 
     let mut imported = 0usize;
@@ -93,11 +95,11 @@ pub fn import_twitter_file(
             parse_twitter_timestamp(&tweet.created_at).unwrap_or_else(|| Utc::now().to_rfc3339());
 
         let inserted = import_common::insert_message_if_new(
-            &conn,
+            &tx,
             &conversation_id,
             &source_id,
             Some(&person_id),
-            false,
+            is_user,
             text,
             &timestamp,
         )
@@ -109,6 +111,8 @@ pub fn import_twitter_file(
             duplicates += 1;
         }
     }
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportSummary {
         source_id,

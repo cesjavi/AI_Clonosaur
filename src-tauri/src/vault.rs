@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -6,9 +7,34 @@ use argon2::Argon2;
 use rand::RngCore;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::{self, DbState};
+
+/// Holds the derived AES-256 key in process memory ONLY while the vault is
+/// unlocked so `RunEvent::Exit` can automatically re-encrypt and remove the
+/// plaintext working copy when the app closes. Cleared on explicit lock/reset.
+#[derive(Default)]
+pub struct VaultKeyState(pub Mutex<Option<[u8; 32]>>);
+
+fn store_session_key(app: &AppHandle, key: [u8; 32]) {
+    if let Some(state) = app.try_state::<VaultKeyState>() {
+        if let Ok(mut guard) = state.0.lock() {
+            *guard = Some(key);
+        }
+    }
+}
+
+fn clear_session_key(app: &AppHandle) {
+    if let Some(state) = app.try_state::<VaultKeyState>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(ref mut k) = *guard {
+                k.fill(0);
+            }
+            *guard = None;
+        }
+    }
+}
 
 const NONCE_LEN: usize = 12;
 const SALT_LEN: usize = 16;
@@ -19,6 +45,35 @@ fn vault_marker_path(app: &AppHandle) -> PathBuf {
 
 fn encrypted_db_path(app: &AppHandle) -> PathBuf {
     db::data_dir(app).join("clonosaur.db.enc")
+}
+
+/// Writes `bytes` to a sibling temp file and atomically renames it over `dest`
+/// so a mid-write crash or disk-full error never truncates an existing file.
+fn write_atomic(dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = dest.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+/// Removes SQLite sidecar files (`-wal`, `-shm`, `-journal`) next to `db_path`
+/// if present. Best-effort: missing files are ignored.
+fn remove_sqlite_sidecars(db_path: &std::path::Path) {
+    let base = db_path.as_os_str();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = base.to_os_string();
+        sidecar.push(suffix);
+        let p = PathBuf::from(sidecar);
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,7 +160,7 @@ pub fn setup_master_password(
     if is_configured(&app) {
         return Err("ya hay una contraseña maestra configurada".to_string());
     }
-    if password.len() < 8 {
+    if password.chars().count() < 8 {
         return Err("la contraseña tiene que tener al menos 8 caracteres".to_string());
     }
 
@@ -113,24 +168,26 @@ pub fn setup_master_password(
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let key = derive_key(&password, &salt)?;
 
-    // Flush any pending writes before reading the file's bytes from disk.
-    {
+    // Keep the DB lock held across checkpoint + file read so no concurrent
+    // write can produce a torn SQLite snapshot.
+    let plaintext = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
-    }
+        std::fs::read(db::db_path(&app)).map_err(|e| e.to_string())?
+    };
 
-    let plaintext = std::fs::read(db::db_path(&app)).map_err(|e| e.to_string())?;
     let encrypted = encrypt_bytes(&key, &plaintext)?;
-    std::fs::write(encrypted_db_path(&app), encrypted).map_err(|e| e.to_string())?;
+    write_atomic(&encrypted_db_path(&app), &encrypted)?;
 
     let marker = VaultMarker {
         salt_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
     };
-    std::fs::write(
-        vault_marker_path(&app),
-        serde_json::to_vec(&marker).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    write_atomic(
+        &vault_marker_path(&app),
+        &serde_json::to_vec(&marker).map_err(|e| e.to_string())?,
+    )?;
+
+    store_session_key(&app, key);
 
     Ok(())
 }
@@ -157,13 +214,24 @@ pub fn unlock_vault(app: AppHandle, db: State<DbState>, password: String) -> Res
     let plaintext = decrypt_bytes(&key, &encrypted)?;
 
     let path = db::db_path(&app);
-    std::fs::write(&path, plaintext).map_err(|e| e.to_string())?;
+    write_atomic(&path, &plaintext)?;
 
-    let new_conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    db::apply_schema(&new_conn);
+    let new_conn = Connection::open(&path).map_err(|e| {
+        let _ = std::fs::remove_file(&path);
+        e.to_string()
+    })?;
+    if let Err(e) = db::apply_schema(&new_conn) {
+        drop(new_conn);
+        let _ = std::fs::remove_file(&path);
+        remove_sqlite_sidecars(&path);
+        return Err(e);
+    }
 
     let mut guard = db.0.lock().map_err(|e| e.to_string())?;
     *guard = new_conn;
+    drop(guard);
+
+    store_session_key(&app, key);
 
     Ok(())
 }
@@ -172,19 +240,14 @@ pub fn unlock_vault(app: AppHandle, db: State<DbState>, password: String) -> Res
 /// calls, so it has to be typed again here), re-encrypts the live database,
 /// then drops the plaintext file and swaps `DbState` back to an empty
 /// in-memory placeholder.
-///
-/// The password is verified against the *previous* `.enc` snapshot before
-/// anything else happens — if it's wrong, we bail out here with the live
-/// connection still untouched, instead of destroying the only plaintext copy
-/// first and finding out it was wrong afterward. The new encrypted snapshot
-/// is written to disk while the live connection is *still* the real one, and
-/// only once that write succeeds do we swap in the placeholder and delete the
-/// plaintext file — so a failure anywhere in this function leaves either the
-/// original working database, or a durable encrypted copy, always intact.
 #[tauri::command]
 pub fn lock_vault(app: AppHandle, db: State<DbState>, password: String) -> Result<(), String> {
     if !is_configured(&app) {
         return Err("todavía no configuraste una contraseña maestra".to_string());
+    }
+    let path = db::db_path(&app);
+    if !path.exists() {
+        return Err("el vault ya está bloqueado".to_string());
     }
 
     let marker: VaultMarker =
@@ -197,41 +260,92 @@ pub fn lock_vault(app: AppHandle, db: State<DbState>, password: String) -> Resul
     let previous_encrypted = std::fs::read(encrypted_db_path(&app)).map_err(|e| e.to_string())?;
     decrypt_bytes(&key, &previous_encrypted)?;
 
-    let path = db::db_path(&app);
-
-    // Read the plaintext bytes out (the live connection stays untouched) and
-    // get the encrypted snapshot safely written to disk *before* swapping
-    // anything out. If encryption or the write fails, we bail out here with
-    // the real connection and the plaintext file both exactly as they were —
-    // instead of swapping in an empty placeholder first and only then
-    // discovering there's nothing durable to fall back to.
-    let plaintext = {
-        let guard = db.0.lock().map_err(|e| e.to_string())?;
-        guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
-        std::fs::read(&path).map_err(|e| e.to_string())?
-    };
+    // Hold the DB lock across snapshot read, atomic encrypted write, connection
+    // swap, and plaintext deletion so no concurrent command can slip a write in
+    // between snapshot and deletion (TOCTOU data loss).
+    let mut guard = db.0.lock().map_err(|e| e.to_string())?;
+    guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
+    let plaintext = std::fs::read(&path).map_err(|e| e.to_string())?;
 
     let encrypted = encrypt_bytes(&key, &plaintext)?;
-    std::fs::write(encrypted_db_path(&app), encrypted).map_err(|e| e.to_string())?;
+    write_atomic(&encrypted_db_path(&app), &encrypted)?;
 
-    // Only now that the encrypted copy is durably on disk do we drop the real
-    // connection — required on Windows, where an open file can't be deleted
-    // out from under a live SQLite connection.
-    {
-        let mut guard = db.0.lock().map_err(|e| e.to_string())?;
-        let placeholder = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        db::apply_schema(&placeholder);
-        let real_conn = std::mem::replace(&mut *guard, placeholder);
-        drop(real_conn);
-    }
+    let placeholder = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    db::apply_schema(&placeholder)?;
+    let real_conn = std::mem::replace(&mut *guard, placeholder);
+    drop(real_conn);
 
-    std::fs::remove_file(&path).map_err(|e| {
-        format!(
+    if let Err(e) = std::fs::remove_file(&path) {
+        // Restore the live connection so the app is never left in a half-locked
+        // state (plaintext still on disk but DbState pointing to an empty memory DB).
+        if let Ok(reopened) = Connection::open(&path) {
+            if db::apply_schema(&reopened).is_ok() {
+                *guard = reopened;
+            }
+        }
+        return Err(format!(
             "se guardó la copia cifrada pero no se pudo borrar el archivo sin cifrar (queda sin cifrar en disco, reintentá bloquear): {e}"
-        )
-    })?;
+        ));
+    }
+    remove_sqlite_sidecars(&path);
+    clear_session_key(&app);
 
     Ok(())
+}
+
+/// Best-effort automatic lock called on `RunEvent::Exit`: re-encrypts the live
+/// database using the in-memory session key, closes the SQLite connection, and
+/// removes the plaintext working copy so closing the app never leaves the
+/// vault unlocked on disk.
+pub fn lock_on_exit(app: &AppHandle) {
+    if !is_configured(app) {
+        return;
+    }
+    let path = db::db_path(app);
+    if !path.exists() {
+        clear_session_key(app);
+        return;
+    }
+    let key = app.try_state::<VaultKeyState>().and_then(|state| {
+        state.0.lock().ok().and_then(|mut guard| {
+            let k = *guard;
+            if let Some(ref mut existing) = *guard {
+                existing.fill(0);
+            }
+            *guard = None;
+            k
+        })
+    });
+    let Some(mut key) = key else {
+        return;
+    };
+
+    if let Some(db_state) = app.try_state::<DbState>() {
+        if let Ok(mut guard) = db_state.0.lock() {
+            guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
+            match std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|plaintext| encrypt_bytes(&key, &plaintext))
+                .and_then(|encrypted| write_atomic(&encrypted_db_path(app), &encrypted))
+            {
+                Ok(()) => {
+                    if let Ok(placeholder) = Connection::open_in_memory() {
+                        let real_conn = std::mem::replace(&mut *guard, placeholder);
+                        drop(real_conn);
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            eprintln!("clonosaur: no se pudo borrar clonosaur.db al salir: {e}");
+                        } else {
+                            remove_sqlite_sidecars(&path);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("clonosaur: no se pudo cifrar el vault al salir: {e}");
+                }
+            }
+        }
+    }
+    key.fill(0);
 }
 
 /// Full reset: requires typing an exact confirmation phrase (checked
@@ -251,21 +365,17 @@ pub fn reset_database(
         ));
     }
 
-    {
-        let mut guard = db.0.lock().map_err(|e| e.to_string())?;
-        let placeholder = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        let old = std::mem::replace(&mut *guard, placeholder);
-        drop(old);
-    }
+    clear_session_key(&app);
 
-    // Delete the plaintext file, then the encrypted snapshot, then the
-    // marker *last*: if a deletion fails partway (e.g. a transient Windows
-    // file lock), whatever hasn't been removed yet keeps `is_configured()`
-    // true and the app safely gated behind the unlock screen — deleting the
-    // marker first would instead make the app treat the leftover plaintext
-    // file as a fresh, unprotected database on the next launch.
+    let mut guard = db.0.lock().map_err(|e| e.to_string())?;
+    let placeholder = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    db::apply_schema(&placeholder)?;
+    let old = std::mem::replace(&mut *guard, placeholder);
+    drop(old);
+
+    let db_file = db::db_path(&app);
     for path in [
-        db::db_path(&app),
+        db_file.clone(),
         encrypted_db_path(&app),
         vault_marker_path(&app),
     ] {
@@ -274,10 +384,10 @@ pub fn reset_database(
                 .map_err(|e| format!("no se pudo borrar {}: {e}", path.display()))?;
         }
     }
+    remove_sqlite_sidecars(&db_file);
 
-    let new_conn = Connection::open(db::db_path(&app)).map_err(|e| e.to_string())?;
-    db::apply_schema(&new_conn);
-    let mut guard = db.0.lock().map_err(|e| e.to_string())?;
+    let new_conn = Connection::open(&db_file).map_err(|e| e.to_string())?;
+    db::apply_schema(&new_conn)?;
     *guard = new_conn;
 
     Ok(())

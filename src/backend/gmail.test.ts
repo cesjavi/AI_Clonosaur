@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseFromHeader, parseGmailDate, splitMboxMessages } from "./gmail";
+import { decodeBody, extractPlainText, parseFromHeader, parseGmailDate, splitMboxMessages } from "./gmail";
 
 describe("parseFromHeader", () => {
   it("extracts the display name from 'Name <email>' form", () => {
@@ -16,6 +16,22 @@ describe("parseFromHeader", () => {
 
   it("returns the raw value when there's no angle-bracket address", () => {
     expect(parseFromHeader("jane@example.com")).toBe("jane@example.com");
+  });
+
+  it("handles '>' appearing before '<' in display name", () => {
+    expect(parseFromHeader('"Bob > Alice" <bob@example.com>')).toBe("Bob > Alice");
+  });
+});
+
+describe("extractPlainText & decodeBody", () => {
+  it("skips standard MIME preamble before the first boundary", () => {
+    const body =
+      "This is a multi-part message in MIME format.\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nHola mundo\r\n--B--";
+    expect(extractPlainText("multipart/alternative; boundary=B", "7bit", body)?.trim()).toBe("Hola mundo");
+  });
+
+  it("preserves literal UTF-8 characters inside quoted-printable bodies", () => {
+    expect(decodeBody("¿Cómo estás?=20bien", "quoted-printable")).toBe("¿Cómo estás? bien");
   });
 });
 

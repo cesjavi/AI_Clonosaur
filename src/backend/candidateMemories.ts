@@ -85,8 +85,15 @@ ${evidenceBlock}`;
   let created = 0;
 
   for (const fact of facts) {
-    if (!fact.content?.trim()) continue;
-    const sourceMessageId = fact.index !== undefined ? messages[fact.index]?.[0] ?? null : null;
+    if (!fact || typeof fact.content !== "string" || !fact.content.trim() || typeof fact.layer !== "string" || !fact.layer.trim()) {
+      continue;
+    }
+    const candidateId = typeof fact.index === "number" ? messages[fact.index]?.[0] ?? null : null;
+    let sourceMessageId: string | null = null;
+    if (candidateId) {
+      const exists = await dbQuery("SELECT 1 FROM messages WHERE id = ?", [candidateId]);
+      if (exists.length > 0) sourceMessageId = candidateId;
+    }
     const evidenceText = llm.valueToText(fact.evidence);
     const metadata = JSON.stringify({ evidence: evidenceText });
 

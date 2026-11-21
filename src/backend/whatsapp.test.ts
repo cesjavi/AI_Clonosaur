@@ -37,6 +37,15 @@ describe("parseWhatsappTimestamp", () => {
     expect(parseWhatsappTimestamp("not-a-date", "10:15")).toBeNull();
     expect(parseWhatsappTimestamp("4/3/2024", "not-a-time")).toBeNull();
   });
+
+  it("rejects out-of-range calendar dates and times instead of rolling over", () => {
+    expect(parseWhatsappTimestamp("31/02/2024", "10:15")).toBeNull();
+    expect(parseWhatsappTimestamp("04/03/2024", "25:99")).toBeNull();
+  });
+
+  it("parses Spanish meridiem with non-breaking spaces", () => {
+    expect(parseWhatsappTimestamp("4/3/2024", "2:15\u202fp.\u00a0m.")).toBe("2024-03-04T14:15:00.000Z");
+  });
 });
 
 describe("parseWhatsappText", () => {
@@ -67,5 +76,14 @@ describe("parseWhatsappText", () => {
     const messages = parseWhatsappText(content);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ author: "Ana", text: "Hola!" });
+  });
+
+  it("strips leading BOM and iOS LRM marks and does not attach multi-line system notices to prior messages", () => {
+    const content =
+      "\uFEFF[4/3/24, 10:15:00 AM] Ana: Hola\n\u200E[4/3/24, 10:16:00 AM] Beto: Chau\n[4/3/24, 10:17:00 AM] Cambió el código de seguridad\nTocá para más info";
+    const messages = parseWhatsappText(content);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ author: "Ana", text: "Hola" });
+    expect(messages[1]).toMatchObject({ author: "Beto", text: "Chau" });
   });
 });

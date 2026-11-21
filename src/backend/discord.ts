@@ -19,6 +19,17 @@ export async function importDiscordFile(fileName: string, bytes: Uint8Array): Pr
   const contentsIdx = find("Contents") !== -1 ? find("Contents") : find("Content");
   if (contentsIdx === -1) throw new Error("el CSV necesita una columna 'Contents' o 'Content'");
 
+  const parsedRows: [string, string][] = [];
+  for (const row of rows.slice(1)) {
+    const text = (row[contentsIdx] ?? "").trim();
+    if (!text) continue;
+    const timestamp = importCommon.normalizeTimestamp(row[timestampIdx] ?? "");
+    parsedRows.push([text, timestamp]);
+  }
+  if (parsedRows.length === 0) {
+    throw new Error("no se encontraron mensajes en el archivo CSV");
+  }
+
   const sourceId = await importCommon.createSource("discord", fileName);
   const conversationId = await importCommon.getOrCreateConversation(
     sourceId,
@@ -31,12 +42,7 @@ export async function importDiscordFile(fileName: string, bytes: Uint8Array): Pr
   let imported = 0;
   let duplicates = 0;
 
-  for (const row of rows.slice(1)) {
-    const text = (row[contentsIdx] ?? "").trim();
-    if (!text) continue;
-
-    const timestamp = importCommon.normalizeTimestamp(row[timestampIdx] ?? "");
-
+  for (const [text, timestamp] of parsedRows) {
     const inserted = await importCommon.insertMessageIfNew(
       conversationId,
       sourceId,

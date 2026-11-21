@@ -122,6 +122,7 @@ pub async fn generate_candidate_memories(state: State<'_, DbState>) -> Result<us
             .prepare(
                 "SELECT m.id, m.text FROM messages m
                  WHERE m.is_user = 1
+                 AND m.sensitivity IS NOT 'sensible'
                  AND m.id NOT IN (SELECT source_message_id FROM memories WHERE source_message_id IS NOT NULL)
                  ORDER BY RANDOM() LIMIT 30",
             )
@@ -169,7 +170,15 @@ Respondé ÚNICAMENTE un array JSON de objetos con esas 4 claves, sin texto adic
         let source_message_id = fact
             .index
             .and_then(|i| messages.get(i))
-            .map(|(id, _)| id.clone());
+            .map(|(id, _)| id.clone())
+            .filter(|id| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                    params![id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+            });
         let evidence_text = llm::value_to_text(&fact.evidence);
         let metadata = serde_json::json!({ "evidence": evidence_text }).to_string();
 

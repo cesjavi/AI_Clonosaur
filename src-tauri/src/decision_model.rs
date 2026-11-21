@@ -42,7 +42,15 @@ fn gather_decision_evidence(conn: &Connection) -> Result<String, String> {
     }
 
     let mut stmt2 = conn
-        .prepare("SELECT content FROM memories WHERE status IN ('confirmed','edited') LIMIT 40")
+        .prepare(
+            "SELECT mem.content FROM memories mem
+             WHERE mem.status IN ('confirmed','edited')
+             AND NOT EXISTS (
+               SELECT 1 FROM messages ms
+               WHERE ms.id = mem.source_message_id AND ms.sensitivity = 'sensible'
+             )
+             LIMIT 40",
+        )
         .map_err(|e| e.to_string())?;
     let mems = stmt2
         .query_map([], |row| row.get::<_, String>(0))
@@ -57,7 +65,9 @@ fn gather_decision_evidence(conn: &Connection) -> Result<String, String> {
     }
 
     let mut stmt3 = conn
-        .prepare("SELECT text FROM messages WHERE is_user = 1 ORDER BY RANDOM() LIMIT 20")
+        .prepare(
+            "SELECT text FROM messages WHERE is_user = 1 AND sensitivity IS NOT 'sensible' ORDER BY RANDOM() LIMIT 20",
+        )
         .map_err(|e| e.to_string())?;
     let msgs = stmt3
         .query_map([], |row| row.get::<_, String>(0))

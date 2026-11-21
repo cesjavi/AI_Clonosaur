@@ -11,52 +11,50 @@ const host = process.env.TAURI_DEV_HOST;
 const isTauriBuild = process.env.TAURI_ENV_PLATFORM !== undefined;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [
     react(),
     // Web build only (see docs/WEB_VERSION.md, Phase W6): a service worker
     // inside the Tauri desktop webview would risk serving stale cached
     // assets after the auto-updater replaces the app bundle on disk,
     // defeating the whole point of auto-update.
-    ...(isTauriBuild
+    ...(isTauriBuild || mode === "tauri"
       ? []
       : [
-          VitePWA({
-            registerType: "autoUpdate",
-            includeAssets: ["icon-192.png", "icon-512.png"],
-            manifest: {
-              name: "Clonosaur",
-              short_name: "Clonosaur",
-              description: "Agente personal local-first",
-              theme_color: "#1a1a2e",
-              background_color: "#1a1a2e",
-              display: "standalone",
-              start_url: "/",
-              icons: [
-                { src: "/icon-192.png", sizes: "256x256", type: "image/png" },
-                { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
-              ],
-            },
-            workbox: {
-              // Precaches the SPA shell (JS/CSS/HTML) and wa-sqlite's .wasm
-              // so the app opens and serves already-imported/-generated
-              // data offline — chat/hybrid mode still need the network to
-              // reach Ollama or an external provider either way, same as
-              // online (see the "Done when" note in WEB_VERSION.md).
-              //
-              // `onnxruntime-web`'s inference engine (`ort-wasm-*.wasm`,
-              // ~24MB — the WASM runtime itself, not the Whisper model
-              // weights, which are fetched separately and cached by
-              // `@huggingface/transformers` on first voice use) is
-              // deliberately excluded: it's only ever needed once someone
-              // actually uses the mic, and precaching 24MB on every install
-              // would make "add to home screen" unreasonably slow for a
-              // feature most sessions never touch.
-              globPatterns: ["**/*.{js,css,html,wasm,png,svg,ico}"],
-              globIgnores: ["**/ort-*.wasm"],
-            },
-          }),
-        ]),
+        VitePWA({
+          registerType: "autoUpdate",
+          includeAssets: ["icon-192.png", "icon-512.png"],
+          manifest: {
+            name: "Clonosaur",
+            short_name: "Clonosaur",
+            description: "Agente personal local-first",
+            theme_color: "#1a1a2e",
+            background_color: "#1a1a2e",
+            display: "standalone",
+            start_url: "/",
+            icons: [
+              { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+              { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+            ],
+          },
+          workbox: {
+            globPatterns: ["**/*.{js,css,html,wasm,png,svg,ico}"],
+            globIgnores: ["**/ort-*.wasm"],
+            runtimeCaching: [
+              {
+                // Cache ONNX Runtime WASM lazily on first voice use so offline
+                // transcription works once a Whisper model has been downloaded.
+                urlPattern: /\/assets\/ort-.*\.wasm$/,
+                handler: "CacheFirst",
+                options: {
+                  cacheName: "ort-wasm-runtime",
+                  expiration: { maxEntries: 4 },
+                },
+              },
+            ],
+          },
+        }),
+      ]),
   ],
 
   // wa-sqlite's Emscripten loader (wa-sqlite.mjs) fetches its .wasm file
@@ -83,10 +81,10 @@ export default defineConfig(async () => ({
     host: host || false,
     hmr: host
       ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
+        protocol: "ws",
+        host,
+        port: 1421,
+      }
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`

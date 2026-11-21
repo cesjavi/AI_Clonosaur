@@ -1,4 +1,5 @@
 import { dbQuery } from "./db";
+import * as settings from "./settings";
 
 export interface Metrics {
   total_messages: number;
@@ -28,9 +29,11 @@ export interface Metrics {
  * overlaps, not execution) — one statement returning all 15 counts pays that
  * overhead once. */
 export async function getMetrics(): Promise<Metrics> {
-  const rows = await dbQuery(`SELECT
+  const embeddingModel = await settings.getSettingFromDb("embedding_model", settings.DEFAULT_EMBEDDING_MODEL);
+  const rows = await dbQuery(
+    `SELECT
     (SELECT COUNT(*) FROM messages) AS total_messages,
-    (SELECT COUNT(*) FROM embeddings) AS messages_with_embedding,
+    (SELECT COUNT(*) FROM embeddings WHERE model = ?) AS messages_with_embedding,
     (SELECT COUNT(*) FROM messages WHERE sensitivity = 'sensible') AS sensitive_messages,
     (SELECT COUNT(*) FROM memories WHERE status = 'candidate') AS memories_candidate,
     (SELECT COUNT(*) FROM memories WHERE status = 'confirmed') AS memories_confirmed,
@@ -43,7 +46,9 @@ export async function getMetrics(): Promise<Metrics> {
     (SELECT COUNT(*) FROM drafts WHERE status = 'rejected') AS drafts_rejected,
     (SELECT COUNT(*) FROM interview_answers WHERE answer != '') AS interview_answered,
     (SELECT COUNT(*) FROM agent_sessions) AS total_sessions,
-    (SELECT COUNT(*) FROM chat_turns) AS total_turns`);
+    (SELECT COUNT(*) FROM chat_turns) AS total_turns`,
+    [embeddingModel],
+  );
 
   const row = rows[0];
   return {

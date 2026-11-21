@@ -36,12 +36,29 @@ interface HybridPreview {
   rendered_text: string;
 }
 
+interface PendingHybridPreview extends HybridPreview {
+  anonymized: boolean;
+  userInput: string;
+}
+
 interface ProviderInfo {
   provider: string;
   base_url: string;
   model: string;
   has_api_key: boolean;
 }
+
+interface ChatTurn {
+  id: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
+  groq: "llama-3.3-70b-versatile",
+  openai: "gpt-4o-mini",
+};
 
 export default function Chat() {
   const [mode, setMode] = useState<Mode>("rag");
@@ -53,51 +70,61 @@ export default function Chat() {
   const [streamingText, setStreamingText] = useState<string | null>(null);
 
   const [anonymize, setAnonymize] = useState(false);
-  const [preview, setPreview] = useState<HybridPreview | null>(null);
+  const [preview, setPreview] = useState<PendingHybridPreview | null>(null);
   const [providerForm, setProviderForm] = useState({ provider: "groq", baseUrl: "", apiKey: "", model: "" });
   const [providerInfo, setProviderInfo] = useState<ProviderInfo | null>(null);
   const [showProviderConfig, setShowProviderConfig] = useState(false);
 
   const [recording, setRecording] = useState(false);
+  const [startingRecording, setStartingRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
 
+  const mountedRef = useRef(true);
   const sessionIdRef = useRef<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
-    // `cancelled` guards against React StrictMode's dev-mode
-    // mount→cleanup→remount: if cleanup runs before create_session resolves,
-    // sessionIdRef.current is still null (nothing for the cleanup below to
-    // close), so the just-created session would otherwise leak — orphaned in
-    // agent_sessions with no ended_at. Catching that here closes it directly
-    // instead of relying on the ref having already been set.
+    mountedRef.current = true;
+    invoke<ChatTurn[]>("list_chat_turns")
+      .then((turns) => {
+        if (mountedRef.current && turns.length > 0) {
+          setMessages((prev) => (prev.length === 0 ? turns.map((t) => ({ role: t.role, content: t.content })) : prev));
+        }
+      })
+      .catch(() => { });
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
-    invoke<string>("create_session", { mode }).then((id) => {
-      if (cancelled) {
-        invoke("close_session", { sessionId: id });
-        return;
-      }
-      sessionIdRef.current = id;
-      setSessionId(id);
-    });
+    invoke<string>("create_session", { mode })
+      .then((id) => {
+        if (cancelled) {
+          invoke("close_session", { sessionId: id }).catch(() => { });
+          return;
+        }
+        sessionIdRef.current = id;
+        setSessionId(id);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
 
     return () => {
       cancelled = true;
+      setSessionId(null);
       if (sessionIdRef.current) {
-        invoke("close_session", { sessionId: sessionIdRef.current });
+        invoke("close_session", { sessionId: sessionIdRef.current }).catch(() => { });
         sessionIdRef.current = null;
       }
     };
   }, [mode]);
 
   useEffect(() => {
-    // Same StrictMode race as above: `listen()` resolves asynchronously, so
-    // if cleanup runs first, unlistenRef.current is still null and the
-    // subscription registered by the resolving promise would otherwise leak
-    // and duplicate every streamed token. `cancelled` catches that case and
-    // unregisters it immediately instead of only relying on the ref.
     let cancelled = false;
     listen<string>("chat-stream-delta", (event) => {
       setStreamingText((prev) => (prev ?? "") + event.payload);
@@ -117,7 +144,7 @@ export default function Chat() {
 
   useEffect(() => {
     if (mode === "hybrid") {
-      loadProviderInfo(providerForm.provider);
+      void loadProviderInfo(providerForm.provider);
     }
     // Intentionally re-runs only on switching into "hybrid" mode, not on
     // every keystroke in the provider config form — `saveProvider` already
@@ -125,12 +152,12 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // Releases the microphone if this screen unmounts (e.g. the user
-  // navigates away) while a recording is still in progress — otherwise the
-  // MediaStream/MediaRecorder are orphaned and the mic keeps recording with
-  // nothing left able to stop it. Bypasses the normal onstop transcription
-  // flow (no point starting an async transcription for a component that's
-  // already gone).
+  function changeMode(nextMode: Mode) {
+    setPreview(null);
+    setMode(nextMode);
+  }
+
+  // Releases the microphone and cancels TTS if this screen unmounts.
   useEffect(() => {
     return () => {
       const recorder = mediaRecorderRef.current;
@@ -139,43 +166,65 @@ export default function Chat() {
         recorder.stream.getTracks().forEach((t) => t.stop());
         recorder.stop();
       }
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, []);
 
-  function loadProviderInfo(provider: string) {
-    invoke<ProviderInfo | null>("get_provider_credentials", { provider }).then((info) => {
+  async function loadProviderInfo(provider: string) {
+    try {
+      const info = await invoke<ProviderInfo | null>("get_provider_credentials", { provider });
+      if (!mountedRef.current) return;
       setProviderInfo(info);
       if (info) {
-        setProviderForm((f) => ({ ...f, baseUrl: info.base_url, model: info.model }));
-        // If it's already preloaded (Groq by default) but still doesn't have an
-        // API key, we open the form directly: all that's left is pasting the key.
+        setProviderForm({ provider, baseUrl: info.base_url, model: info.model, apiKey: "" });
         if (!info.has_api_key) {
           setShowProviderConfig(true);
         }
+      } else {
+        const baseUrl = await invoke<string>("default_base_url", { provider });
+        if (!mountedRef.current) return;
+        setProviderForm({
+          provider,
+          baseUrl,
+          model: DEFAULT_PROVIDER_MODELS[provider] ?? "",
+          apiKey: "",
+        });
+        setShowProviderConfig(true);
       }
-    });
+    } catch (e) {
+      if (mountedRef.current) setError(String(e));
+    }
   }
 
-  async function prefillDefault(provider: string) {
-    const baseUrl = await invoke<string>("default_base_url", { provider });
-    setProviderForm((f) => ({ ...f, provider, baseUrl }));
+  async function switchProvider(provider: string) {
+    setPreview(null);
+    await loadProviderInfo(provider);
   }
 
   async function saveProvider(e: React.FormEvent) {
     e.preventDefault();
-    await invoke("save_provider_credentials", {
-      provider: providerForm.provider,
-      baseUrl: providerForm.baseUrl,
-      apiKey: providerForm.apiKey,
-      model: providerForm.model,
-    });
-    loadProviderInfo(providerForm.provider);
-    setShowProviderConfig(false);
+    setError(null);
+    try {
+      await invoke("save_provider_credentials", {
+        provider: providerForm.provider,
+        baseUrl: providerForm.baseUrl,
+        apiKey: providerForm.apiKey,
+        model: providerForm.model,
+      });
+      await loadProviderInfo(providerForm.provider);
+      setShowProviderConfig(false);
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function sendSimpleOrRag() {
-    if (!input.trim() || !sessionId) return;
-    const history = [...messages, { role: "user", content: input }];
+    if (!input.trim() || !sessionId || busy) return;
+    const userText = input;
+    const prevMessages = messages;
+    const history = [...prevMessages, { role: "user", content: userText }];
     setMessages(history);
     setInput("");
     setBusy(true);
@@ -193,6 +242,10 @@ export default function Chat() {
         { role: "assistant", content: result.reply, sources: result.sources ?? undefined },
       ]);
     } catch (e) {
+      // Revert optimistic message and restore draft so a transient failure
+      // neither loses the user's text nor leaves consecutive `user` turns.
+      setMessages(prevMessages);
+      setInput(userText);
       setError(String(e));
     } finally {
       setStreamingText(null);
@@ -201,20 +254,22 @@ export default function Chat() {
   }
 
   async function requestHybridPreview() {
-    if (!input.trim() || !sessionId) return;
+    if (!input.trim() || !sessionId || busy) return;
+    const userText = input;
+    const anonymizedSnapshot = anonymize;
     setBusy(true);
     setError(null);
     try {
-      const history = [...messages, { role: "user", content: input }].map((m) => ({
+      const history = [...messages, { role: "user", content: userText }].map((m) => ({
         role: m.role,
         content: m.content,
       }));
       const p = await invoke<HybridPreview>("build_hybrid_preview", {
         provider: providerForm.provider,
         history,
-        anonymize,
+        anonymize: anonymizedSnapshot,
       });
-      setPreview(p);
+      setPreview({ ...p, anonymized: anonymizedSnapshot, userInput: userText });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -223,18 +278,19 @@ export default function Chat() {
   }
 
   async function confirmHybridSend() {
-    if (!preview || !sessionId) return;
+    if (!preview || !sessionId || busy) return;
+    const pending = preview;
     setBusy(true);
     setError(null);
     try {
       const reply = await invoke<string>("send_to_external_provider", {
         sessionId,
-        provider: preview.provider,
-        messages: preview.messages,
-        renderedText: preview.rendered_text,
-        anonymized: anonymize,
+        provider: pending.provider,
+        messages: pending.messages,
+        renderedText: pending.rendered_text,
+        anonymized: pending.anonymized,
       });
-      setMessages((prev) => [...prev, { role: "user", content: input }, { role: "assistant", content: reply }]);
+      setMessages((prev) => [...prev, { role: "user", content: pending.userInput }, { role: "assistant", content: reply }]);
       setInput("");
       setPreview(null);
     } catch (e) {
@@ -249,7 +305,11 @@ export default function Chat() {
     if (buffer.sampleRate === targetRate && buffer.numberOfChannels === 1) {
       return buffer.getChannelData(0);
     }
-    const offlineCtx = new OfflineAudioContext(1, Math.ceil(buffer.duration * targetRate), targetRate);
+    const frameCount = Math.ceil(buffer.duration * targetRate);
+    if (frameCount < 1) {
+      throw new Error("la grabación está vacía");
+    }
+    const offlineCtx = new OfflineAudioContext(1, frameCount, targetRate);
     const source = offlineCtx.createBufferSource();
     source.buffer = buffer;
     source.connect(offlineCtx.destination);
@@ -264,9 +324,15 @@ export default function Chat() {
       setRecording(false);
       return;
     }
+    if (startingRecording) return;
+    setStartingRecording(true);
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       const recorder = new MediaRecorder(stream);
       audioChunksRef.current = [];
       recorder.ondataavailable = (e) => {
@@ -274,29 +340,32 @@ export default function Chat() {
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
+        if (!mountedRef.current) return;
         setTranscribing(true);
+        const audioCtx = new AudioContext();
         try {
           const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
           const arrayBuffer = await blob.arrayBuffer();
-          const audioCtx = new AudioContext();
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
           const samples = await resampleTo16kMono(audioBuffer);
-          await audioCtx.close();
           const text = await invoke<string>("transcribe_audio", { samples: Array.from(samples) });
-          if (text.trim()) {
+          if (mountedRef.current && text.trim()) {
             setInput((prev) => (prev ? `${prev} ${text.trim()}` : text.trim()));
           }
         } catch (e) {
-          setError(String(e));
+          if (mountedRef.current) setError(String(e));
         } finally {
-          setTranscribing(false);
+          await audioCtx.close().catch(() => { });
+          if (mountedRef.current) setTranscribing(false);
         }
       };
       recorder.start();
       mediaRecorderRef.current = recorder;
       setRecording(true);
     } catch (e) {
-      setError(String(e));
+      if (mountedRef.current) setError(String(e));
+    } finally {
+      if (mountedRef.current) setStartingRecording(false);
     }
   }
 
@@ -311,13 +380,13 @@ export default function Chat() {
   return (
     <div className="chat">
       <div className="chat-mode">
-        <button className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>
+        <button className={mode === "simple" ? "active" : ""} onClick={() => changeMode("simple")} disabled={busy}>
           Simple
         </button>
-        <button className={mode === "rag" ? "active" : ""} onClick={() => setMode("rag")}>
+        <button className={mode === "rag" ? "active" : ""} onClick={() => changeMode("rag")} disabled={busy}>
           Con memoria (RAG)
         </button>
-        <button className={mode === "hybrid" ? "active" : ""} onClick={() => setMode("hybrid")}>
+        <button className={mode === "hybrid" ? "active" : ""} onClick={() => changeMode("hybrid")} disabled={busy}>
           Híbrido
         </button>
       </div>
@@ -340,7 +409,12 @@ export default function Chat() {
             <span className="chat-provider-status">Sin configurar todavía</span>
           )}
           <label>
-            <input type="checkbox" checked={anonymize} onChange={(e) => setAnonymize(e.currentTarget.checked)} />
+            <input
+              type="checkbox"
+              checked={anonymize}
+              disabled={preview !== null}
+              onChange={(e) => setAnonymize(e.currentTarget.checked)}
+            />
             Anonimizar contactos
           </label>
 
@@ -348,7 +422,7 @@ export default function Chat() {
             <form className="chat-provider-form" onSubmit={saveProvider}>
               <select
                 value={providerForm.provider}
-                onChange={(e) => prefillDefault(e.currentTarget.value)}
+                onChange={(e) => switchProvider(e.currentTarget.value)}
               >
                 <option value="groq">groq</option>
                 <option value="openai">openai</option>
@@ -372,7 +446,7 @@ export default function Chat() {
               />
               <input
                 type="password"
-                placeholder="API key"
+                placeholder={providerInfo?.has_api_key ? "API key (dejá vacío para conservar la actual)" : "API key"}
                 value={providerForm.apiKey}
                 onChange={(e) => {
                   const apiKey = e.currentTarget.value;
@@ -432,7 +506,9 @@ export default function Chat() {
             <button onClick={confirmHybridSend} disabled={busy}>
               Confirmar y enviar
             </button>
-            <button onClick={() => setPreview(null)}>Cancelar</button>
+            <button onClick={() => setPreview(null)} disabled={busy}>
+              Cancelar
+            </button>
           </div>
         </div>
       )}
@@ -442,7 +518,7 @@ export default function Chat() {
           <button
             className={recording ? "chat-mic recording" : "chat-mic"}
             onClick={toggleRecording}
-            disabled={busy || transcribing}
+            disabled={busy || transcribing || startingRecording}
             title={recording ? "Detener grabación" : "Grabar mensaje de voz"}
           >
             {recording ? "⏹" : "🎤"}

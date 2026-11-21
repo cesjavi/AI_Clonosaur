@@ -41,25 +41,48 @@ let vaultMode = false;
  * refuses to remove a file/directory that still has one open. */
 let plaintextVfs: InstanceType<typeof AccessHandlePoolVFS> | null = null;
 
+async function applySchema(database: number): Promise<void> {
+  await sqlite3!.exec(database, "PRAGMA foreign_keys = ON;");
+  await sqlite3!.exec(database, schemaSql as string);
+  // Seed default Groq provider on fresh databases (mirrors src-tauri/src/db.rs).
+  await sqlite3!.exec(
+    database,
+    `INSERT OR IGNORE INTO provider_credentials (provider, base_url, api_key, model, updated_at)
+     VALUES ('groq', 'https://api.groq.com/openai/v1', '', 'llama-3.3-70b-versatile', datetime('now'))`,
+  );
+}
+
+async function ensureSqlite(): Promise<SQLiteAPI> {
+  if (!sqlite3) {
+    const module = await SQLiteESMFactory();
+    sqlite3 = SQLite.Factory(module);
+  }
+  return sqlite3;
+}
+
 function open(): Promise<void> {
   if (!ready) {
     ready = (async () => {
-      const module = await SQLiteESMFactory();
-      sqlite3 = SQLite.Factory(module);
+      const api = await ensureSqlite();
       const vfs = new AccessHandlePoolVFS("clonosaur");
       await vfs.isReady;
       plaintextVfs = vfs;
-      sqlite3.vfs_register(vfs, true);
+      api.vfs_register(vfs, true);
       // SQLITE_OPEN_URI so `exportSnapshot`'s `VACUUM INTO
       // 'file:export.db?vfs=memory'` gets parsed as a URI targeting the
       // named `memory` VFS — without it, the whole string is treated as a
       // literal filename on this connection's own VFS instead.
-      db = await sqlite3.open_v2(
+      db = await api.open_v2(
         "clonosaur.db",
         SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_URI,
       );
-      await sqlite3.exec(db, schemaSql as string);
-    })();
+      await applySchema(db);
+    })().catch((err) => {
+      // Never poison `ready` permanently on a transient failure (e.g. a second
+      // tab temporarily holding the exclusive OPFS AccessHandlePool lock).
+      ready = null;
+      throw err;
+    });
   }
   return ready;
 }
@@ -125,6 +148,28 @@ const api = {
     });
   },
 
+  /** Executes a list of write statements atomically inside a single SQLite
+   * transaction within one serialized slot, returning each statement's
+   * affected-row count. */
+  runBatch(statements: { sql: string; params?: SQLiteCompatibleType[] }[]): Promise<number[]> {
+    return serialize(async () => {
+      await ensureOpen();
+      const counts: number[] = [];
+      await sqlite3!.exec(db!, "BEGIN;");
+      try {
+        for (const stmt of statements) {
+          await sqlite3!.run(db!, stmt.sql, stmt.params ?? []);
+          counts.push(sqlite3!.changes(db!));
+        }
+        await sqlite3!.exec(db!, "COMMIT;");
+        return counts;
+      } catch (err) {
+        await sqlite3!.exec(db!, "ROLLBACK;").catch(() => {});
+        throw err;
+      }
+    });
+  },
+
   /** Copies the current live database (whichever mode is active) out as raw
    * bytes via `VACUUM INTO` a throwaway `MemoryVFS` entry. Used both for the
    * one-time plaintext→encrypted transition (`setup_master_password`, while
@@ -168,12 +213,9 @@ const api = {
    * connection). */
   async loadVaultDatabase(bytes: Uint8Array): Promise<void> {
     return serialize(async () => {
-      if (!sqlite3) {
-        const module = await SQLiteESMFactory();
-        sqlite3 = SQLite.Factory(module);
-      }
+      const api = await ensureSqlite();
       if (db !== null) {
-        await sqlite3.close(db);
+        await api.close(db).catch(() => {});
         db = null;
       }
       const vfs = getMemVfs();
@@ -184,32 +226,43 @@ const api = {
         size: copy.byteLength,
         data: copy.buffer,
       });
-      // Same SQLITE_OPEN_URI requirement as the plaintext open() above — a
-      // `lock_vault` after this unlock also goes through `exportSnapshot`'s
-      // `VACUUM INTO 'file:...?vfs=...'`.
-      db = await sqlite3.open_v2(
-        "clonosaur.db",
-        SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_URI,
-        "memory",
-      );
-      await sqlite3.exec(db, schemaSql as string);
-      vaultMode = true;
-      ready = Promise.resolve();
+      try {
+        // Same SQLITE_OPEN_URI requirement as the plaintext open() above — a
+        // `lock_vault` after this unlock also goes through `exportSnapshot`'s
+        // `VACUUM INTO 'file:...?vfs=...'`.
+        db = await api.open_v2(
+          "clonosaur.db",
+          SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_URI,
+          "memory",
+        );
+        await applySchema(db);
+        vaultMode = true;
+        ready = Promise.resolve();
+      } catch (err) {
+        if (db !== null) {
+          await api.close(db).catch(() => {});
+          db = null;
+        }
+        vfs.mapNameToFile.delete("clonosaur.db");
+        vaultMode = false;
+        ready = null;
+        throw err;
+      }
     });
   },
 
-  /** Deletes the plaintext OPFS storage — used by `lock_vault` (once an
-   * encrypted snapshot is safely written, no plaintext copy should remain)
-   * and `reset_database`. Runs entirely inside this Worker, the same
-   * context that opened the pool's sync access handles, so it can close
-   * them (`plaintextVfs.close()`) before removing the directory — OPFS
-   * refuses `removeEntry` on a directory with files still held open, and
-   * that release can only happen from wherever the handles were acquired. */
+  /** Deletes the plaintext OPFS storage AND closes any active database
+   * (including an unlocked `MemoryVFS` vault DB), clearing decrypted bytes
+   * from memory and resetting `vaultMode = false` so `lock_vault` and
+   * `reset_database` leave zero decrypted data accessible in the Worker. */
   async wipePlaintextStorage(): Promise<void> {
     return serialize(async () => {
-      if (db !== null && !vaultMode && sqlite3) {
+      if (db !== null && sqlite3) {
         await sqlite3.close(db).catch(() => {});
         db = null;
+      }
+      if (memVfs) {
+        memVfs.mapNameToFile.clear();
       }
       if (plaintextVfs) {
         await plaintextVfs.close();
@@ -217,6 +270,7 @@ const api = {
       }
       const root = await navigator.storage.getDirectory();
       await root.removeEntry("clonosaur", { recursive: true }).catch(() => {});
+      vaultMode = false;
       ready = null;
     });
   },

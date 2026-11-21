@@ -19,7 +19,11 @@ struct GenericRecord {
 fn parse_csv(content: &str) -> Result<Vec<GenericRecord>, String> {
     let mut reader = csv::ReaderBuilder::new().from_reader(content.as_bytes());
     let headers = reader.headers().map_err(|e| e.to_string())?.clone();
-    let find = |name: &str| headers.iter().position(|h| h == name);
+    let find = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h.trim().eq_ignore_ascii_case(name))
+    };
 
     let text_idx = find("text").ok_or("el CSV necesita una columna 'text'")?;
     let timestamp_idx = find("timestamp");
@@ -35,15 +39,19 @@ fn parse_csv(content: &str) -> Result<Vec<GenericRecord>, String> {
         }
         let timestamp = timestamp_idx
             .and_then(|i| row.get(i))
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let author = author_idx
             .and_then(|i| row.get(i))
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let is_user = is_user_idx
             .and_then(|i| row.get(i))
-            .map(|s| s == "true" || s == "1");
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.eq_ignore_ascii_case("true") || s == "1");
 
         records.push(GenericRecord {
             text,
@@ -60,13 +68,34 @@ fn parse_csv(content: &str) -> Result<Vec<GenericRecord>, String> {
 /// `author?`/`is_user?`, or plain `.txt` (one line = one of the user's own messages).
 #[tauri::command]
 pub fn import_generic_file(state: State<DbState>, path: String) -> Result<ImportSummary, String> {
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let raw_content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let content = raw_content.strip_prefix('\u{FEFF}').unwrap_or(&raw_content);
     let lower = path.to_lowercase();
 
     let records: Vec<GenericRecord> = if lower.ends_with(".json") {
-        serde_json::from_str(&content).map_err(|e| format!("JSON inválido: {e}"))?
+        let raw_records: Vec<GenericRecord> =
+            serde_json::from_str(content).map_err(|e| format!("JSON inválido: {e}"))?;
+        raw_records
+            .into_iter()
+            .filter_map(|mut r| {
+                let text = r.text.trim().to_string();
+                if text.is_empty() {
+                    return None;
+                }
+                r.text = text;
+                r.author = r
+                    .author
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty());
+                r.timestamp = r
+                    .timestamp
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                Some(r)
+            })
+            .collect()
     } else if lower.ends_with(".csv") {
-        parse_csv(&content)?
+        parse_csv(content)?
     } else {
         content
             .lines()
@@ -90,12 +119,11 @@ pub fn import_generic_file(state: State<DbState>, path: String) -> Result<Import
         .unwrap_or_else(|| path.clone());
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let source_id =
-        import_common::create_source(&conn, "generic", &file_name).map_err(|e| e.to_string())?;
-    // The file name is the "thread" fingerprint: reimporting the same file
-    // lands in the same conversation, and duplicate detection avoids repeating messages.
+        import_common::create_source(&tx, "generic", &file_name).map_err(|e| e.to_string())?;
     let conversation_id = import_common::get_or_create_conversation(
-        &conn,
+        &tx,
         &source_id,
         "generic",
         &file_name,
@@ -108,30 +136,37 @@ pub fn import_generic_file(state: State<DbState>, path: String) -> Result<Import
     let mut participants: Vec<String> = Vec::new();
 
     for rec in records {
-        let timestamp = rec.timestamp.unwrap_or_else(|| Utc::now().to_rfc3339());
+        let has_timestamp = rec.timestamp.is_some();
+        let timestamp = rec
+            .timestamp
+            .as_deref()
+            .map(import_common::normalize_timestamp)
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
 
         let (person_id, is_user) = match &rec.author {
             Some(name) => {
                 if !participants.contains(name) {
                     participants.push(name.clone());
                 }
-                let pid =
-                    import_common::get_or_create_person(&conn, name).map_err(|e| e.to_string())?;
-                import_common::ensure_participant(&conn, &conversation_id, &pid)
+                let (pid, person_is_user) =
+                    import_common::get_or_create_person_with_flag(&tx, name)
+                        .map_err(|e| e.to_string())?;
+                import_common::ensure_participant(&tx, &conversation_id, &pid)
                     .map_err(|e| e.to_string())?;
-                (Some(pid), rec.is_user.unwrap_or(false))
+                (Some(pid), rec.is_user.unwrap_or(person_is_user))
             }
             None => (None, rec.is_user.unwrap_or(true)),
         };
 
-        let inserted = import_common::insert_message_if_new(
-            &conn,
+        let inserted = import_common::insert_message_if_new_opts(
+            &tx,
             &conversation_id,
             &source_id,
             person_id.as_deref(),
             is_user,
             &rec.text,
             &timestamp,
+            has_timestamp,
         )
         .map_err(|e| e.to_string())?;
 
@@ -141,6 +176,8 @@ pub fn import_generic_file(state: State<DbState>, path: String) -> Result<Import
             duplicates += 1;
         }
     }
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportSummary {
         source_id,

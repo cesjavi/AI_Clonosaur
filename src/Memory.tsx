@@ -60,10 +60,15 @@ export default function Memory() {
   }
 
   async function sendFeedback(messageId: string, isUser: boolean) {
-    await invoke("record_feedback", { messageId, isUser });
-    setResults((prev) =>
-      prev.map((r) => (r.message_id === messageId ? { ...r, is_user: isUser } : r)),
-    );
+    setError(null);
+    try {
+      await invoke("record_feedback", { messageId, isUser });
+      setResults((prev) =>
+        prev.map((r) => (r.message_id === messageId ? { ...r, is_user: isUser } : r)),
+      );
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   return (

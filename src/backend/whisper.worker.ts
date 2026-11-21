@@ -17,17 +17,52 @@ import * as Comlink from "comlink";
 // TranscriptionState caches a loaded WhisperContext on desktop: loading a
 // model (fetching + compiling the ONNX graph) takes real time.
 const pipelines = new Map<string, Promise<AutomaticSpeechRecognitionPipeline>>();
+/** Only populated once `loadPipeline` actually resolves, so an in-progress or
+ * failed download never makes `isCached()` falsely report `true`. */
+const loadedPipelines = new Set<string>();
 
 function loadPipeline(modelId: string): Promise<AutomaticSpeechRecognitionPipeline> {
   let promise = pipelines.get(modelId);
   if (!promise) {
-    promise = pipeline("automatic-speech-recognition", modelId, {
-      device: "wasm",
-      dtype: "q8",
-    }) as Promise<AutomaticSpeechRecognitionPipeline>;
+    promise = (
+      pipeline("automatic-speech-recognition", modelId, {
+        device: "wasm",
+        dtype: "q8",
+      }) as Promise<AutomaticSpeechRecognitionPipeline>
+    ).then(
+      (instance) => {
+        loadedPipelines.add(modelId);
+        return instance;
+      },
+      (err) => {
+        // Evict failed promises so retries work after transient network errors.
+        pipelines.delete(modelId);
+        loadedPipelines.delete(modelId);
+        throw err;
+      },
+    );
     pipelines.set(modelId, promise);
   }
   return promise;
+}
+
+async function isCachedOfflineFallback(modelId: string): Promise<boolean> {
+  if (typeof caches === "undefined") return false;
+  try {
+    const cache = await caches.open("transformers-cache");
+    const keys = await cache.keys();
+    let hasConfig = false;
+    let hasOnnx = false;
+    for (const req of keys) {
+      if (!req.url.includes(modelId)) continue;
+      if (req.url.endsWith("/config.json")) hasConfig = true;
+      if (req.url.endsWith(".onnx")) hasOnnx = true;
+      if (hasConfig && hasOnnx) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 const api = {
@@ -40,20 +75,26 @@ const api = {
   },
 
   /** Asks the browser's actual model cache whether every file this pipeline
-   * needs is present, instead of trusting a separately-tracked "installed"
-   * flag that can drift from it (e.g. after the browser evicts Cache Storage
-   * under storage pressure) — the web-build equivalent of transcription.rs
-   * checking `model_path(...).exists()` directly against the real thing. */
+   * needs is present, falling back to Cache Storage inspection when offline
+   * (since `ModelRegistry.is_cached` queries metadata over the network). */
   async isCached(modelId: string): Promise<boolean> {
-    if (pipelines.has(modelId)) return true;
-    return ModelRegistry.is_cached(modelId, { dtype: "q8" });
+    if (loadedPipelines.has(modelId)) return true;
+    try {
+      return await ModelRegistry.is_cached(modelId, { dtype: "q8", device: "wasm" });
+    } catch {
+      return isCachedOfflineFallback(modelId);
+    }
   },
 
   async transcribe(modelId: string, samples: Float32Array): Promise<string> {
     const transcriber = await loadPipeline(modelId);
-    // No `language` option: lets Whisper auto-detect it, same as desktop's
-    // transcription.rs (see its own fix away from a hardcoded "es").
-    const result = await transcriber(samples, { task: "transcribe" });
+    // Chunked decoding (`chunk_length_s: 30`) prevents silently truncating
+    // voice notes longer than Whisper's 30-second window.
+    const result = await transcriber(samples, {
+      task: "transcribe",
+      chunk_length_s: 30,
+      stride_length_s: 5,
+    });
     const first = Array.isArray(result) ? result[0] : result;
     return (first?.text ?? "").trim();
   },

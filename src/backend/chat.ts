@@ -49,12 +49,15 @@ export async function buildRagMessages(history: ChatMessage[]): Promise<[ChatMes
     buildSystemPrompt(),
     dbQuery("SELECT category, trait, value FROM profile_traits"),
     dbQuery(
-      `SELECT content FROM memories mem
-       WHERE status IN ('confirmed','edited')
+      `SELECT mem.content FROM memories mem
+       WHERE mem.status IN ('confirmed','edited')
        AND NOT EXISTS (
-         SELECT 1 FROM messages ms WHERE ms.id = mem.source_message_id AND ms.sensitivity = 'sensible'
+         SELECT 1 FROM messages ms
+         LEFT JOIN people p ON p.id = ms.person_id
+         WHERE ms.id = mem.source_message_id
+           AND (ms.sensitivity = 'sensible' OR p.excluded = 1)
        )
-       ORDER BY created_at DESC LIMIT 20`,
+       ORDER BY mem.created_at DESC LIMIT 20`,
     ),
   ]);
   let system = system0;
@@ -85,9 +88,10 @@ export async function buildRagMessages(history: ChatMessage[]): Promise<[ChatMes
     }
   }
   if (messagesUsed.length > 0) {
-    system += "\n\nMensajes relevantes tuyos:";
+    system += "\n\nMensajes relevantes del historial:";
     for (const m of messagesUsed) {
-      system += `\n- (${m.timestamp}) ${m.text}`;
+      const speaker = m.is_user ? "Vos" : (m.author ?? "Contacto");
+      system += `\n- (${m.timestamp}) [${speaker}] ${m.text}`;
     }
   }
 
@@ -96,7 +100,7 @@ export async function buildRagMessages(history: ChatMessage[]): Promise<[ChatMes
       "\n\nNo hay perfil, memorias ni mensajes relevantes disponibles todavía. Si la pregunta depende de esa información, decí explícitamente que no tenés suficiente información en vez de inventar.";
   }
 
-  const messages: ChatMessage[] = [{ role: "system", content: system }, ...history];
+  const messages: ChatMessage[] = [{ role: "system", content: system }, ...history.map((m) => ({ ...m }))];
 
   return [
     messages,
@@ -116,7 +120,7 @@ export async function ollamaChat(sessionId: string, history: ChatMessage[]): Pro
 
   const reply = await llm.chatCompletionMessages(messages);
 
-  const lastUser = history[history.length - 1];
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
   if (lastUser) await sessions.recordTurn(sessionId, "user", lastUser.content);
   await sessions.recordTurn(sessionId, "assistant", reply);
 
@@ -134,7 +138,7 @@ export async function chatWithMemory(sessionId: string, history: ChatMessage[]):
   const [messages, sourcesUsed] = await buildRagMessages(history);
   const reply = await llm.chatCompletionMessages(messages);
 
-  const lastUser = history[history.length - 1];
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
   if (lastUser) await sessions.recordTurn(sessionId, "user", lastUser.content);
   await sessions.recordTurn(sessionId, "assistant", reply);
 
@@ -250,6 +254,39 @@ export async function sendChatStream(sessionId: string, mode: string, history: C
   let fullReply = "";
   let leftover = "";
 
+  const processLine = (rawLine: string): boolean => {
+    let line = rawLine.trim();
+    if (!line) return false;
+
+    if (isOpenAiStyle) {
+      // Ignore SSE comments (`: keep-alive`) and non-data fields (`event:`, `id:`).
+      if (!line.startsWith("data:")) return false;
+      line = line.slice("data:".length).trim();
+      if (line === "[DONE]") return true;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (e) {
+      throw new Error(`respuesta en streaming inválida: ${e}`, { cause: e });
+    }
+
+    const content = isOpenAiStyle
+      ? (parsed as { choices?: { delta?: { content?: unknown } }[] })?.choices?.[0]?.delta?.content
+      : (parsed as { message?: { content?: unknown } })?.message?.content;
+
+    if (typeof content === "string") {
+      const visible = filter.push(content);
+      if (visible) {
+        fullReply += visible;
+        events.emit("chat-stream-delta", visible);
+      }
+    }
+    return false;
+  };
+
+  let streamDone = false;
   outer: for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -257,37 +294,18 @@ export async function sendChatStream(sessionId: string, mode: string, history: C
 
     let newlineIdx: number;
     while ((newlineIdx = leftover.indexOf("\n")) !== -1) {
-      let line = leftover.slice(0, newlineIdx).trim();
+      const rawLine = leftover.slice(0, newlineIdx);
       leftover = leftover.slice(newlineIdx + 1);
-      if (!line) continue;
-
-      // OpenAI style sends Server-Sent Events: each line starts with
-      // "data: " and the stream ends with the "data: [DONE]" sentinel
-      // (which isn't valid JSON, so we must stop there instead of parsing it).
-      if (isOpenAiStyle) {
-        line = line.replace(/^data:\s*/, "");
-        if (line === "[DONE]") break outer;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch (e) {
-        throw new Error(`respuesta en streaming inválida: ${e}`, { cause: e });
-      }
-
-      const content = isOpenAiStyle
-        ? (parsed as { choices?: { delta?: { content?: unknown } }[] })?.choices?.[0]?.delta?.content
-        : (parsed as { message?: { content?: unknown } })?.message?.content;
-
-      if (typeof content === "string") {
-        const visible = filter.push(content);
-        if (visible) {
-          fullReply += visible;
-          events.emit("chat-stream-delta", visible);
-        }
+      if (processLine(rawLine)) {
+        streamDone = true;
+        break outer;
       }
     }
+  }
+
+  leftover += decoder.decode();
+  if (!streamDone && leftover.trim()) {
+    processLine(leftover);
   }
 
   const { text: tail, truncatedInThink } = filter.flush();
@@ -295,9 +313,6 @@ export async function sendChatStream(sessionId: string, mode: string, history: C
     fullReply += tail;
     events.emit("chat-stream-delta", tail);
   }
-
-  const lastUser = history[history.length - 1];
-  if (lastUser) await sessions.recordTurn(sessionId, "user", lastUser.content);
 
   if (!fullReply.trim()) {
     throw new Error(
@@ -307,6 +322,8 @@ export async function sendChatStream(sessionId: string, mode: string, history: C
     );
   }
 
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
+  if (lastUser) await sessions.recordTurn(sessionId, "user", lastUser.content);
   await sessions.recordTurn(sessionId, "assistant", fullReply);
 
   return { reply: fullReply, sources: sourcesUsed };

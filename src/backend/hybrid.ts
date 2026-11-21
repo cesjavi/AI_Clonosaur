@@ -20,13 +20,16 @@ export async function saveProviderCredentials(
   apiKey: string,
   model: string,
 ): Promise<void> {
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
   await dbRun(
     `INSERT INTO provider_credentials (provider, base_url, api_key, model, updated_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(provider) DO UPDATE SET
-        base_url = excluded.base_url, api_key = excluded.api_key,
-        model = excluded.model, updated_at = excluded.updated_at`,
-    [provider, baseUrl, apiKey, model, new Date().toISOString()],
+        base_url = excluded.base_url,
+        api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE provider_credentials.api_key END,
+        model = excluded.model,
+        updated_at = excluded.updated_at`,
+    [provider, normalizedBaseUrl, apiKey, model, new Date().toISOString()],
   );
 }
 
@@ -63,6 +66,22 @@ function renderMessages(messages: chat.ChatMessage[]): string {
   return messages.map((m) => `[${m.role}]\n${m.content}`).join("\n\n");
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Case-insensitive, Unicode word-boundary contact anonymizer sorted
+ * longest-first so `"Ana María"` is replaced before `"Ana"` and ordinary words
+ * like `"mañana"` are never corrupted. */
+export function anonymizeText(text: string, names: string[]): string {
+  const sorted = [...new Set(names.map((n) => n.trim()).filter((n) => n.length > 0))].sort(
+    (a, b) => b.length - a.length,
+  );
+  if (sorted.length === 0) return text;
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}])(?:${sorted.map(escapeRegExp).join("|")})(?![\\p{L}\\p{N}])`, "giu");
+  return text.replace(pattern, "[contacto]");
+}
+
 /** Builds the EXACT message that would be sent, without making any network
  * call. Reuses `buildRagMessages` (same context logic as the local chat)
  * and offers to anonymize contact names before showing the preview. */
@@ -71,17 +90,14 @@ export async function buildHybridPreview(
   history: chat.ChatMessage[],
   anonymize: boolean,
 ): Promise<HybridPreview> {
-  const [messages] = await chat.buildRagMessages(history);
+  const [rawMessages] = await chat.buildRagMessages(history);
+  const messages = rawMessages.map((m) => ({ ...m }));
 
   if (anonymize) {
     const rows = await dbQuery("SELECT name FROM people WHERE is_user = 0");
     const names = rows.map((r) => r.name as string);
     for (const m of messages) {
-      for (const name of names) {
-        if (name.trim()) {
-          m.content = m.content.split(name).join("[contacto]");
-        }
-      }
+      m.content = anonymizeText(m.content, names);
     }
   }
 
@@ -112,7 +128,7 @@ export async function sendToExternalProvider(
   if (rows.length === 0) {
     throw new Error(`no hay credenciales guardadas para '${provider}'`);
   }
-  const baseUrl = rows[0].base_url as string;
+  const baseUrl = (rows[0].base_url as string).trim().replace(/\/+$/, "");
   const apiKey = rows[0].api_key as string;
   const model = rows[0].model as string;
 
@@ -131,13 +147,28 @@ export async function sendToExternalProvider(
     throw new Error(`${provider} respondió ${res.status}: ${await res.text()}`);
   }
 
-  const parsed = await res.json();
-  const reply: string = parsed?.choices?.[0]?.message?.content ?? "";
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch (e) {
+    throw new Error(`respuesta de ${provider} inesperada: ${e}`, { cause: e });
+  }
+  const choices = (parsed as { choices?: { message?: { content?: unknown } }[] })?.choices;
+  if (!Array.isArray(choices)) {
+    throw new Error(`respuesta de ${provider} inesperada: falta 'choices'`);
+  }
+  const replyContent = choices[0]?.message?.content;
+  const reply = typeof replyContent === "string" ? replyContent : "";
+
+  // Always audit the exact outbound `messages` rather than trusting the
+  // caller-supplied `renderedText`.
+  void renderedText;
+  const actualRendered = renderMessages(messages);
 
   await dbRun(
     `INSERT INTO external_send_log (id, provider, model, anonymized, content, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [crypto.randomUUID(), provider, model, anonymized ? 1 : 0, renderedText, new Date().toISOString()],
+    [crypto.randomUUID(), provider, model, anonymized ? 1 : 0, actualRendered, new Date().toISOString()],
   );
 
   const lastUser = [...messages].reverse().find((m) => m.role === "user");

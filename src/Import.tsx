@@ -43,41 +43,41 @@ const IMPORT_BUTTONS: {
   filters: { name: string; extensions: string[] }[];
   needsUsername?: boolean;
 }[] = [
-  {
-    command: "import_whatsapp_file",
-    label: "Importar chat de WhatsApp (.txt / .zip)",
-    filters: [{ name: "WhatsApp", extensions: ["txt", "zip"] }],
-  },
-  {
-    command: "import_gmail_file",
-    label: "Importar Gmail Takeout (.mbox)",
-    filters: [{ name: "Gmail", extensions: ["mbox"] }],
-  },
-  {
-    command: "import_twitter_file",
-    label: "Importar archive de Twitter/X (tweet.js)",
-    filters: [{ name: "Twitter/X", extensions: ["js"] }],
-    // The archive itself has no username inside tweet.js — every tweet
-    // needs a person to attribute to, whether that's the user themself or
-    // a contact who shared their own export (see twitter.ts).
-    needsUsername: true,
-  },
-  {
-    command: "import_discord_file",
-    label: "Importar canal de Discord (messages.csv)",
-    filters: [{ name: "Discord", extensions: ["csv"] }],
-  },
-  {
-    command: "import_reddit_file",
-    label: "Importar Reddit (comments.csv / posts.csv)",
-    filters: [{ name: "Reddit", extensions: ["csv"] }],
-  },
-  {
-    command: "import_generic_file",
-    label: "Importar archivo genérico (.json / .csv / .txt)",
-    filters: [{ name: "Genérico", extensions: ["json", "csv", "txt"] }],
-  },
-];
+    {
+      command: "import_whatsapp_file",
+      label: "Importar chat de WhatsApp (.txt / .zip)",
+      filters: [{ name: "WhatsApp", extensions: ["txt", "zip"] }],
+    },
+    {
+      command: "import_gmail_file",
+      label: "Importar Gmail Takeout (.mbox)",
+      filters: [{ name: "Gmail", extensions: ["mbox"] }],
+    },
+    {
+      command: "import_twitter_file",
+      label: "Importar archive de Twitter/X (tweet.js)",
+      filters: [{ name: "Twitter/X", extensions: ["js"] }],
+      // The archive itself has no username inside tweet.js — every tweet
+      // needs a person to attribute to, whether that's the user themself or
+      // a contact who shared their own export (see twitter.ts).
+      needsUsername: true,
+    },
+    {
+      command: "import_discord_file",
+      label: "Importar canal de Discord (messages.csv)",
+      filters: [{ name: "Discord", extensions: ["csv"] }],
+    },
+    {
+      command: "import_reddit_file",
+      label: "Importar Reddit (comments.csv / posts.csv)",
+      filters: [{ name: "Reddit", extensions: ["csv"] }],
+    },
+    {
+      command: "import_generic_file",
+      label: "Importar archivo genérico (.json / .csv / .txt)",
+      filters: [{ name: "Genérico", extensions: ["json", "csv", "txt"] }],
+    },
+  ];
 
 export default function Import() {
   const [sources, setSources] = useState<SourceSummary[]>([]);
@@ -94,17 +94,21 @@ export default function Import() {
     value: string;
   } | null>(null);
 
-  function loadSources() {
-    invoke<SourceSummary[]>("list_sources").then(setSources).catch((e) => setError(String(e)));
+  function loadSources(): Promise<void> {
+    return invoke<SourceSummary[]>("list_sources")
+      .then(setSources)
+      .catch((e) => setError(String(e)));
   }
 
-  function loadPeople() {
-    invoke<PersonSummary[]>("list_people").then(setPeople).catch((e) => setError(String(e)));
+  function loadPeople(): Promise<void> {
+    return invoke<PersonSummary[]>("list_people")
+      .then(setPeople)
+      .catch((e) => setError(String(e)));
   }
 
   useEffect(() => {
-    loadSources();
-    loadPeople();
+    void loadSources();
+    void loadPeople();
   }, []);
 
   // "cancel" fires on the native file dialog when the user closes it without
@@ -129,9 +133,10 @@ export default function Import() {
     setLastSummary(null);
     try {
       const summary = await invoke<ImportSummary>(command, args);
+      // Wait for refreshed people/sources BEFORE exposing participant buttons
+      // so clicking "markAsMe" immediately never races against stale state.
+      await Promise.all([loadSources(), loadPeople()]);
       setLastSummary(summary);
-      loadSources();
-      loadPeople();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -144,13 +149,19 @@ export default function Import() {
     filters: { name: string; extensions: string[] }[],
   ) {
     if (isTauri()) {
-      const path = await open({ multiple: false, filters });
-      if (!path || Array.isArray(path)) {
+      try {
+        const path = await open({ multiple: false, filters });
+        if (!path || Array.isArray(path)) {
+          return;
+        }
+        const username = pendingUsernameRef.current;
         pendingUsernameRef.current = null;
-        return;
+        await runImport(command, { path, ...(username ? { username } : {}) });
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        pendingUsernameRef.current = null;
       }
-      await runImport(command, { path, ...(pendingUsernameRef.current ? { username: pendingUsernameRef.current } : {}) });
-      pendingUsernameRef.current = null;
       return;
     }
 
@@ -187,13 +198,21 @@ export default function Import() {
 
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const command = pendingCommandRef.current;
+    const username = pendingUsernameRef.current;
+    pendingCommandRef.current = null;
+    pendingUsernameRef.current = null;
     const file = e.currentTarget.files?.[0];
     e.currentTarget.value = "";
     if (!command || !file) return;
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const username = pendingUsernameRef.current;
-    pendingUsernameRef.current = null;
-    await runImport(command, { fileName: file.name, bytes, ...(username ? { username } : {}) });
+    setBusy(true);
+    setError(null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await runImport(command, { fileName: file.name, bytes, ...(username ? { username } : {}) });
+    } catch (err) {
+      setError(String(err));
+      setBusy(false);
+    }
   }
 
   async function markAsMe(name: string) {
@@ -202,17 +221,26 @@ export default function Import() {
       setError(`no se encontró a "${name}" entre los contactos guardados`);
       return;
     }
-    await invoke("set_user_person", { personId: person.id });
-    loadPeople();
-    loadSources();
+    setError(null);
+    try {
+      await invoke("set_user_person", { personId: person.id });
+      await Promise.all([loadPeople(), loadSources()]);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function changeRelationship(personId: string, relationship: string) {
-    await invoke("set_person_relationship", {
-      personId,
-      relationship: relationship === "" ? null : relationship,
-    });
-    loadPeople();
+    setError(null);
+    try {
+      await invoke("set_person_relationship", {
+        personId,
+        relationship: relationship === "" ? null : relationship,
+      });
+      await loadPeople();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   return (

@@ -30,11 +30,15 @@ export default function Copilot() {
   const [editingText, setEditingText] = useState("");
 
   function loadPeople() {
-    invoke<PersonSummary[]>("list_people").then((all) => setPeople(all.filter((p) => !p.is_user)));
+    invoke<PersonSummary[]>("list_people")
+      .then((all) => setPeople(all.filter((p) => !p.is_user)))
+      .catch((e) => setError(String(e)));
   }
 
   function loadDrafts() {
-    invoke<Draft[]>("list_drafts").then(setDrafts);
+    invoke<Draft[]>("list_drafts")
+      .then(setDrafts)
+      .catch((e) => setError(String(e)));
   }
 
   useEffect(() => {
@@ -61,8 +65,13 @@ export default function Copilot() {
   }
 
   async function setStatus(id: string, status: string, content?: string) {
-    await invoke("update_draft_status", { id, status, content: content ?? null });
-    loadDrafts();
+    setError(null);
+    try {
+      await invoke("update_draft_status", { id, status, content: content ?? null });
+      loadDrafts();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   function startEdit(d: Draft) {

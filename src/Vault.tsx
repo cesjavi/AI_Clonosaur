@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "./backend/invoke";
+import { invoke, isTauri } from "./backend/invoke";
 import "./Vault.css";
 
 interface VaultStatus {
@@ -81,7 +81,11 @@ export function VaultSecurity({ status, onStatusChange }: VaultSecurityProps) {
       await invoke("setup_master_password", { password: newPassword });
       setNewPassword("");
       setConfirmPassword("");
-      setMessage("Contraseña maestra configurada. La base queda cifrada la próxima vez que la bloquees.");
+      setMessage(
+        isTauri()
+          ? "Contraseña maestra configurada. La base se cifra automáticamente al bloquear o cerrar la app."
+          : "Contraseña maestra configurada. Tu base ya está cifrada en reposo y se guarda cifrada automáticamente.",
+      );
       onStatusChange();
     } catch (err) {
       setError(String(err));
@@ -125,9 +129,9 @@ export function VaultSecurity({ status, onStatusChange }: VaultSecurityProps) {
       {!status.configured && (
         <form className="vault-form" onSubmit={setupPassword}>
           <p className="vault-hint">
-            Todavía no configuraste una contraseña maestra: tu base vive sin cifrar en disco. Esto la cifra
-            (AES-256-GCM + Argon2id) para que solo se pueda leer con esta contraseña. No hay forma de
-            recuperarla si la olvidás.
+            Todavía no configuraste una contraseña maestra: tu base vive sin cifrar en disco. Esto la cifra (
+            {isTauri() ? "AES-256-GCM + Argon2id" : "AES-256-GCM + PBKDF2-SHA256"}) para que solo se pueda leer con esta
+            contraseña. No hay forma de recuperarla si la olvidás.
           </p>
           <input
             type="password"

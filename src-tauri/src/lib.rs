@@ -32,10 +32,11 @@ use db::DbState;
 use std::sync::Mutex;
 use tauri::Manager;
 use transcription::TranscriptionState;
+use vault::VaultKeyState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -51,6 +52,7 @@ pub fn run() {
             let conn = db::init_db(app.handle());
             app.manage(DbState(Mutex::new(conn)));
             app.manage(TranscriptionState::default());
+            app.manage(VaultKeyState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -112,6 +114,12 @@ pub fn run() {
             vault::lock_vault,
             vault::reset_database,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            vault::lock_on_exit(app_handle);
+        }
+    });
 }

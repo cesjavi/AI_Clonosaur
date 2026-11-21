@@ -141,4 +141,5 @@ jobs:
       # publish anything, so it doesn't need (or want) access to the real
       # updater signing secret — that's release.yml's job, on a real tag.
       - name: Build app bundle (verification only, unsigned)
-        run: npm run tauri build -- --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
+        shell: bash
+        run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'

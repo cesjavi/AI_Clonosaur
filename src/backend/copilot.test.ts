@@ -86,4 +86,10 @@ describe("updateDraftStatus", () => {
     await updateDraftStatus("d1", "approved", null);
     expect(runMock).toHaveBeenCalledWith(expect.not.stringContaining("content = ?"), ["approved", expect.any(String), "d1"]);
   });
+
+  it("updates only status when content is undefined", async () => {
+    runMock.mockResolvedValueOnce(1);
+    await updateDraftStatus("d1", "approved");
+    expect(runMock).toHaveBeenCalledWith(expect.not.stringContaining("content = ?"), ["approved", expect.any(String), "d1"]);
+  });
 });

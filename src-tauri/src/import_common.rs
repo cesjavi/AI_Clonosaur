@@ -89,19 +89,23 @@ pub fn get_or_create_conversation(
     Ok(id)
 }
 
-/// Looks for a person by exact name; creates it if it doesn't exist. Reused by
-/// all importers to avoid duplicating contacts across re-imports.
-pub fn get_or_create_person(conn: &Connection, name: &str) -> rusqlite::Result<String> {
-    let existing: Option<String> = conn
+/// Looks for a person by exact name; creates it if it doesn't exist. Also
+/// returns whether that person is already marked as the clone's owner (`is_user`)
+/// so re-imports and additional chats inherit the user's identity automatically.
+pub fn get_or_create_person_with_flag(
+    conn: &Connection,
+    name: &str,
+) -> rusqlite::Result<(String, bool)> {
+    let existing: Option<(String, bool)> = conn
         .query_row(
-            "SELECT id FROM people WHERE name = ?1",
+            "SELECT id, is_user FROM people WHERE name = ?1",
             params![name],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
 
-    if let Some(id) = existing {
-        return Ok(id);
+    if let Some(pair) = existing {
+        return Ok(pair);
     }
 
     let id = Uuid::new_v4().to_string();
@@ -109,7 +113,13 @@ pub fn get_or_create_person(conn: &Connection, name: &str) -> rusqlite::Result<S
         "INSERT INTO people (id, name, is_user, created_at) VALUES (?1, ?2, 0, ?3)",
         params![id, name, Utc::now().to_rfc3339()],
     )?;
-    Ok(id)
+    Ok((id, false))
+}
+
+/// Looks for a person by exact name; creates it if it doesn't exist. Reused by
+/// all importers to avoid duplicating contacts across re-imports.
+pub fn get_or_create_person(conn: &Connection, name: &str) -> rusqlite::Result<String> {
+    Ok(get_or_create_person_with_flag(conn, name)?.0)
 }
 
 pub fn ensure_participant(
@@ -156,7 +166,7 @@ pub fn normalize_timestamp(raw: &str) -> String {
     let raw = raw.trim();
 
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
-        return dt.to_rfc3339();
+        return dt.with_timezone(&Utc).to_rfc3339();
     }
 
     // Discord (old exports): "MM/DD/YYYY HH:MM AM/PM"
@@ -179,6 +189,30 @@ pub fn normalize_timestamp(raw: &str) -> String {
     Utc::now().to_rfc3339()
 }
 
+fn find_duplicate_without_timestamp(
+    conn: &Connection,
+    conversation_id: &str,
+    person_id: Option<&str>,
+    text: &str,
+) -> rusqlite::Result<Option<String>> {
+    match person_id {
+        Some(pid) => conn
+            .query_row(
+                "SELECT id FROM messages WHERE conversation_id = ?1 AND text = ?2 AND person_id = ?3",
+                params![conversation_id, text, pid],
+                |row| row.get(0),
+            )
+            .optional(),
+        None => conn
+            .query_row(
+                "SELECT id FROM messages WHERE conversation_id = ?1 AND text = ?2 AND person_id IS NULL",
+                params![conversation_id, text],
+                |row| row.get(0),
+            )
+            .optional(),
+    }
+}
+
 /// Inserts a message if it's not a duplicate (same text + timestamp + author
 /// within the same conversation). Returns `true` if it was inserted, `false`
 /// if it already existed (reimport of the same source).
@@ -191,7 +225,39 @@ pub fn insert_message_if_new(
     text: &str,
     timestamp: &str,
 ) -> rusqlite::Result<bool> {
-    if find_duplicate_message_id(conn, conversation_id, person_id, timestamp, text)?.is_some() {
+    insert_message_if_new_opts(
+        conn,
+        conversation_id,
+        source_id,
+        person_id,
+        is_user,
+        text,
+        timestamp,
+        true,
+    )
+}
+
+/// Variant for sources whose records may lack a real timestamp (e.g. plain
+/// `.txt` generic imports): when `match_timestamp` is `false`, deduplicates
+/// on `(conversation_id, person_id, text)` so re-importing the same file
+/// doesn't duplicate every line just because `Utc::now()` changed.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_message_if_new_opts(
+    conn: &Connection,
+    conversation_id: &str,
+    source_id: &str,
+    person_id: Option<&str>,
+    is_user: bool,
+    text: &str,
+    timestamp: &str,
+    match_timestamp: bool,
+) -> rusqlite::Result<bool> {
+    let dup = if match_timestamp {
+        find_duplicate_message_id(conn, conversation_id, person_id, timestamp, text)?
+    } else {
+        find_duplicate_without_timestamp(conn, conversation_id, person_id, text)?
+    };
+    if dup.is_some() {
         return Ok(false);
     }
 
